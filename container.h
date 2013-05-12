@@ -1,4 +1,6 @@
 #include <cassert>
+#include <cstddef>
+#include <iostream>
 
 template<class DataType>
 class Container
@@ -22,6 +24,14 @@ public:
     
     DataType &enque() { assert(0); }
     DataType &deque() { assert(0); }
+    
+    const bool is_full() {
+        return this->m_length == this->m_size;
+    }
+    
+    const bool is_empty() {
+        return this->m_length == 0;
+    }
     
     const int length() {
         return this->m_length;
@@ -48,55 +58,65 @@ public:
     
     DataType &operator [](int index) {
         assert(index >=0 && index < this->length);
+        
         return this->data[this->length-index-1];
     }
     
     DataType &enque() {
         assert(this->m_length < this->size);
+        
         DataType &data = this->m_data[this->m_length];
         this->m_length += 1;
+        
         return data;
     }
     
     DataType &deque() {
         assert(this->m_length > 0);
+        
         DataType &data = this->m_data[this->m_length-1];
         this->m_length -= 1;
+        
         return data;
     }
 };
 
 template<class DataType>
-class RingBuffer : public Container<DataType>
+class Queue : public Container<DataType>
 {
 protected:
     size_t m_cursor;
 
 public:
-    RingBuffer(int size) : Container<DataType>(size) {
+    Queue(int size) : Container<DataType>(size) {
         this->m_cursor = 0;
     }
     
-    ~RingBuffer() {
+    ~Queue() {
     }
     
     DataType &operator [](int index) {
         assert(index >=0 && index < this->length);
+        
         return this->m_data[(this->m_cursor+index)%this->m_size];
     }
     
     DataType &enque() {
         assert(this->m_length < this->size);
+        
         DataType &data = this->m_data[(this->m_cursor+this->m_length)%this->m_size];
         this->m_length += 1;
+        
         return data;
     }
     
     DataType &deque() {
         assert(this->m_length > 0);
+        
         DataType &data = this->m_data[this->m_cursor];
         this->m_cursor = (this->m_cursor+1)%this->m_size;
         this->m_length -= 1;
+        
         return data;
     }
 };
@@ -114,38 +134,23 @@ protected:
     Node *m_nodes;
     Node *m_head;
     Node *m_tail;
-    Node *m_last;
-    
-    void drop(Node *ahead, Node *back) {
-        // remove (ahead, back]
-        Node *front;
-        if (ahead == NULL) {
-            front = this->m_head;
-            this->m_head = back->next;
-        } else {
-            front = ahead->next;
-            ahead->next = back->next;
-        }
-        // append (ahead, back] to the end
-        if (this->m_tail == NULL)
-            this->m_tail = front;
-        this->m_last->next = front;
-        this->m_last = back;
-        back->next = NULL;
-    }
+    Node *m_free;
+    bool m_log;
 
 public:
-    LinkedList(int size) : Container<DataType>(size) {
+    LinkedList(int size, bool log = false) : Container<DataType>(size) {
         this->m_nodes = new Node[size];
         for (int i=0; i<size; ++i) {
             this->m_nodes[i].data = &(this->m_data[i]);
             this->m_nodes[i].next = &(this->m_nodes[i+1]);
         }
-        this->m_last = &(this->m_nodes[size-1]);
-        this->m_last->next = NULL;
+        this->m_nodes[size-1].next = NULL;
         
-        this->m_head = this->m_nodes;
-        this->m_tail = this->m_nodes;
+        this->m_head = NULL;
+        this->m_tail = NULL;
+        this->m_free = this->m_nodes;
+        
+        this->m_log = log;
     }
     
     virtual ~LinkedList() {
@@ -154,18 +159,28 @@ public:
     
     DataType &enque() {
         assert(this->m_length < this->m_size);
-        DataType &data = *(this->m_tail->data);
-        this->m_tail = this->m_tail->next;
+        
+        Node *node = this->m_free;
+        this->m_free = this->m_free->next;
+        
+        node->next = this->m_head;
+        this->m_head = node;
         this->m_length += 1;
-        return data;
+        
+        return *(node->data);
     }
     
     DataType &deque() {
         assert(this->m_length > 0);
-        DataType &data = *(this->m_head->data);
-        this->drop(NULL, this->m_head);
+        
+        Node *node = this->m_head;
+        this->m_head = this->m_head->next;
         this->m_length -= 1;
-        return data;
+        
+        node->next = this->m_free;
+        this->m_free = node;
+        
+        return *(node->data);
     }
     
     class Iterator {
@@ -184,6 +199,7 @@ public:
         iter.prev = NULL;
         iter.node = NULL;
     }
+    
     bool next(Iterator &iter) {
         iter.prev = iter.node;
         if (iter.node == NULL) {
@@ -191,10 +207,21 @@ public:
         } else {
             iter.node = iter.node->next;
         }
-        return iter.node != this->m_tail;
+        
+        return iter.node;
     }
-    bool remove(Iterator &iter) {
-        this->drop(iter.prev, iter.node);
+    
+    void remove(Iterator &iter) {        
+        if (iter.prev == NULL) {
+            this->m_head = iter.node->next;
+        } else {
+            iter.prev->next = iter.node->next;
+        }
+        this->m_length -= 1;
+        
+        iter.node->next = this->m_free;
+        this->m_free = iter.node;
+        
         iter.node = iter.prev;
     }
 };
