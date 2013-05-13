@@ -8,39 +8,44 @@ using namespace DRAM;
 
 int main(int argc, char *argv[])
 {
+    int bound = 1000;
+    LinkedList<int> sieve(bound);
+    for (int i=1; i<=bound; ++i) {
+    }
     
-    std::map<std::string, int> config;
+    std::map<std::string, int> settings;
     
-    config["transaction"] = 64;
-    config["command"]     = 64;
+    settings["transaction"] = 64;
+    settings["command"]     = 64;
     
-    config["channel"] = 0;
-    config["rank"]    = 1;
-    config["bank"]    = 3;
-    config["row"]     = 16;
-    config["column"]  = 7;
-    config["line"]    = 6;
+    settings["channel"] = 0;
+    settings["rank"]    = 1;
+    settings["bank"]    = 3;
+    settings["row"]     = 16;
+    settings["column"]  = 7;
+    settings["line"]    = 6;
     
-    config["tCL"]   = 5;
-    config["tCWL"]  = 4;
-    config["tAL"]   = 0;
-    config["tBL"]   = 4;
-    config["tRAS"]  = 15;
-    config["tRCD"]  = 5;
-    config["tRRD"]  = 4;
-    config["tRC"]   = 20;
-    config["tRP"]   = 5;
-    config["tCCD"]  = 4;
-    config["tRTP"]  = 4;
-    config["tWTR"]  = 4;
-    config["tWR"]   = 6;
-    config["tRTRS"] = 1;
-    config["tRFC"]  = 64;
-    config["tFAW"]  = 16;
-    config["tCKE"]  = 3;
-    config["tXP"]   = 3;
+    settings["tCL"]   = 5;
+    settings["tCWL"]  = 4;
+    settings["tAL"]   = 0;
+    settings["tBL"]   = 4;
+    settings["tRAS"]  = 15;
+    settings["tRCD"]  = 5;
+    settings["tRRD"]  = 4;
+    settings["tRC"]   = 20;
+    settings["tRP"]   = 5;
+    settings["tCCD"]  = 4;
+    settings["tRTP"]  = 4;
+    settings["tWTR"]  = 4;
+    settings["tWR"]   = 6;
+    settings["tRTRS"] = 1;
+    settings["tRFC"]  = 64;
+    settings["tFAW"]  = 16;
+    settings["tCKE"]  = 3;
+    settings["tXP"]   = 3;
     
-    MemoryController *mc = new MemoryController(new Config(config));
+    Config *config = new Config(settings);    
+    MemoryController *mc = new MemoryController(config);
     
     FILE* file = fopen("../DRAMSim2/traces/mase_art.trc", "r");
     
@@ -49,7 +54,7 @@ int main(int argc, char *argv[])
     uint32_t clock, time, delay;
     bool is_write;
     clock = delay = 0;
-    while(fgets(line, sizeof(line), file)) {
+    while(fgets(line, sizeof(line), file) && clock+delay < 1000) {
         sscanf(line, "0x%x %s %d", &address, command, &time);
         is_write = strcmp(command, "WRITE") == 0;
         while (clock < time) {
@@ -66,6 +71,7 @@ int main(int argc, char *argv[])
     fclose(file);
     
     delete mc;
+    delete config;
     
     return 0;
 }

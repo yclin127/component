@@ -105,7 +105,7 @@ struct Transaction : public Coordinates {
     friend std::ostream &operator <<(std::ostream &os, Transaction &transaction) {
         os << "{"
            << "is_write: " << transaction.is_write 
-           << ", address: " << transaction.address 
+           << ", address: 0x" << std::hex << transaction.address  << std::dec
            << ", coordinates: " << (Coordinates &)transaction 
            << "}";
         return os;
@@ -114,13 +114,15 @@ struct Transaction : public Coordinates {
 
 /** DRAM command types */
 enum CommandType {
-    COMMAND_ACT, /**< row activation */
-    COMMAND_PRE, /**< row precharge */
-    COMMAND_READ, /**< column read */
-    COMMAND_WRITE, /**< column write */
-    COMMAND_READ_PRE, /**< column read with auto row precharge */
-    COMMAND_WRITE_PRE, /**< column write with auto row precharge */
-    COMMAND_REFRESH, /**< rank refresh */
+    COMMAND_act, /**< row activation */
+    COMMAND_pre, /**< row precharge */
+    COMMAND_read, /**< column read */
+    COMMAND_write, /**< column write */
+    COMMAND_read_pre, /**< column read with auto row precharge */
+    COMMAND_write_pre, /**< column write with auto row precharge */
+    COMMAND_refresh, /**< rank refresh */
+    COMMAND_powerdown, /**< rank powerdown */
+    COMMAND_powerup, /**< rank powerup */
 };
 
 /** DRAM command */
@@ -250,6 +252,7 @@ public:
     
     inline const int32_t getRowBuffer(Coordinates &coordinates);
     inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
+    /** sends out the command and change the state of memory system. */
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
     
     friend std::ostream &operator <<(std::ostream &os, MemorySystem &system) {

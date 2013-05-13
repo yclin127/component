@@ -162,9 +162,15 @@ public:
         
         Node *node = this->m_free;
         this->m_free = this->m_free->next;
+        node->next = NULL;
         
-        node->next = this->m_head;
-        this->m_head = node;
+        if (this->m_head == NULL) {
+            this->m_head = node;
+            this->m_tail = node;
+        } else {
+            this->m_tail->next = node;
+            this->m_tail = node;
+        }
         this->m_length += 1;
         
         return *(node->data);
@@ -175,6 +181,9 @@ public:
         
         Node *node = this->m_head;
         this->m_head = this->m_head->next;
+        if (this->m_head == NULL) {
+            this->m_tail == NULL;
+        }
         this->m_length -= 1;
         
         node->next = this->m_free;
@@ -216,6 +225,9 @@ public:
             this->m_head = iter.node->next;
         } else {
             iter.prev->next = iter.node->next;
+        }
+        if (iter.node == this->m_tail) {
+            this->m_tail = iter.prev;
         }
         this->m_length -= 1;
         

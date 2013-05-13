@@ -1,5 +1,4 @@
 #include "dram.h"
-#include <iostream>
 
 using namespace DRAM;
 
@@ -27,7 +26,7 @@ Config::Config(std::map<std::string, int> config)
     timing.channel.read_to_read   = config["tBL"]+config["tRTRS"];
     timing.channel.read_to_write  = config["tCL"]+config["tBL"]+config["tRTRS"]-config["tCWL"];
     timing.channel.write_to_read  = config["tCWL"]+config["tBL"]+config["tRTRS"]-config["tCAS"];
-    timing.channel.write_to_write = config["tBL"]+config["tOST"];
+    timing.channel.write_to_write = config["tBL"]+config["tRTRS"];
     
     timing.rank.act_to_act     = config["tRRD"];
     timing.rank.act_to_faw     = config["tFAW"];
@@ -57,24 +56,6 @@ MemoryController::MemoryController(Config *_config) :
 
 MemoryController::~MemoryController()
 {
-    std::cerr << "statistic:\n" << states << std::endl;
-}
-
-bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &transaction)
-{
-    if (commandQueue.is_full())
-        return false;
-    
-    Command &command = commandQueue.enque();
-    
-    command.type        = type;
-    command.readyTime   = std::max(clock, states.getReadyTime(command.type, transaction));
-    command.finishTime  = states.getFinishTime(command.readyTime, command.type, transaction);
-    command.transaction = &transaction;
-    
-    std::cerr << command << std::endl;
-    
-    return true;
 }
 
 bool MemoryController::addTransaction(uint64_t address, bool is_write)
@@ -83,18 +64,45 @@ bool MemoryController::addTransaction(uint64_t address, bool is_write)
         return false;
     
     Transaction &transaction = transactionQueue.enque();
-    AddressMapping &mapping = config->mapping;
     
     transaction.is_write = is_write;
     transaction.address  = address;
+    
+    transaction.is_pending  = true;
+    transaction.is_finished = false;
+    
+    /** Address mapping scheme goes here. */
+    AddressMapping &mapping = config->mapping;
+    
     transaction.channel  = mapping.channel.value(address);
     transaction.rank     = mapping.rank.value(address);
     transaction.bank     = mapping.bank.value(address);
     transaction.row      = mapping.row.value(address);
     transaction.column   = mapping.column.value(address);
     
-    transaction.is_pending  = true;
-    transaction.is_finished = false;
+    return true;
+}
+
+bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &transaction)
+{
+    if (commandQueue.is_full())
+        return false;
+    
+    int64_t readyTime, finishTime;
+    
+    readyTime = std::max(clock, states.getReadyTime(type, transaction));
+    /** Uncomment this line to switch from FCFS to FR-FCFS */
+    if (readyTime != clock) return false;
+    finishTime = states.getFinishTime(readyTime, type, transaction);
+    
+    Command &command = commandQueue.enque();
+    
+    command.type        = type;
+    command.readyTime   = readyTime;
+    command.finishTime  = finishTime;
+    command.transaction = &transaction;
+    
+    std::cerr << command << std::endl;
     
     return true;
 }
@@ -103,6 +111,8 @@ void MemoryController::cycle(int64_t clock)
 {
     LinkedList<Transaction>::Iterator itq;
     LinkedList<Command>::Iterator icq;
+    
+    /** Memory scheduler algorithm goes here. */
     
     // FCFS or FR-FCFS
     transactionQueue.reset(itq);
@@ -114,17 +124,17 @@ void MemoryController::cycle(int64_t clock)
         int64_t rowBuffer = states.getRowBuffer(transaction);
         
         if (rowBuffer != -1 && rowBuffer != transaction.row) {
-            if (!addCommand(clock, COMMAND_PRE, transaction)) continue;
+            if (!addCommand(clock, COMMAND_pre, transaction)) continue;
             rowBuffer = -1; // getRowBuffer(transaction);
         }
         
         if (rowBuffer == -1) {
-            if (!addCommand(clock, COMMAND_ACT, transaction)) continue;
+            if (!addCommand(clock, COMMAND_act, transaction)) continue;
             rowBuffer = transaction.row; // getRowBuffer(transaction);
         }
         
         if (rowBuffer == transaction.row) {
-            CommandType type = transaction.is_write ? COMMAND_WRITE : COMMAND_READ;
+            CommandType type = transaction.is_write ? COMMAND_write : COMMAND_read;
             if (!addCommand(clock, type, transaction)) continue;
             transaction.is_pending = false;
         }
@@ -137,10 +147,10 @@ void MemoryController::cycle(int64_t clock)
         if (command.finishTime > clock) continue;
         
         switch (command.type) {
-            case COMMAND_READ:
-            case COMMAND_WRITE:
-            case COMMAND_READ_PRE:
-            case COMMAND_WRITE_PRE:
+            case COMMAND_read:
+            case COMMAND_write:
+            case COMMAND_read_pre:
+            case COMMAND_write_pre:
                 command.transaction->is_finished = true;
                 break;
                 
@@ -226,16 +236,16 @@ const int64_t Channel::getReadyTime(CommandType type, Coordinates &coordinates)
     int64_t clock;
     
     switch (type) {
-        case COMMAND_ACT:
-        case COMMAND_REFRESH:
-        case COMMAND_PRE:
+        case COMMAND_act:
+        case COMMAND_refresh:
+        case COMMAND_pre:
             clock = ranks[coordinates.rank]->getReadyTime(type, coordinates);
             clock = std::max(clock, anyReadyTime);
             
             return clock;
             
-        case COMMAND_READ:
-        case COMMAND_READ_PRE:
+        case COMMAND_read:
+        case COMMAND_read_pre:
             clock = ranks[coordinates.rank]->getReadyTime(type, coordinates);
             clock = std::max(clock, anyReadyTime);
             if (rankSelect != coordinates.rank) {
@@ -244,8 +254,8 @@ const int64_t Channel::getReadyTime(CommandType type, Coordinates &coordinates)
             
             return clock;
             
-        case COMMAND_WRITE:
-        case COMMAND_WRITE_PRE:
+        case COMMAND_write:
+        case COMMAND_write_pre:
             clock = ranks[coordinates.rank]->getReadyTime(type, coordinates);
             clock = std::max(clock, anyReadyTime);
             if (rankSelect != coordinates.rank) {
@@ -265,15 +275,15 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
     ChannelTiming &timing = config->timing.channel;
     
     switch (type) {
-        case COMMAND_ACT:
-        case COMMAND_REFRESH:
-        case COMMAND_PRE:
+        case COMMAND_act:
+        case COMMAND_refresh:
+        case COMMAND_pre:
             anyReadyTime   = clock + 1;
             
             return ranks[coordinates.rank]->getFinishTime(clock, type, coordinates);
             
-        case COMMAND_READ:
-        case COMMAND_READ_PRE:
+        case COMMAND_read:
+        case COMMAND_read_pre:
             anyReadyTime   = clock + 1;
             readReadyTime  = clock + timing.read_to_read;
             writeReadyTime = clock + timing.read_to_write;
@@ -282,8 +292,8 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
             
             return ranks[coordinates.rank]->getFinishTime(clock, type, coordinates);
             
-        case COMMAND_WRITE:
-        case COMMAND_WRITE_PRE:
+        case COMMAND_write:
+        case COMMAND_write_pre:
             anyReadyTime   = clock + 1;
             readReadyTime  = clock + timing.write_to_read;
             writeReadyTime = clock + timing.write_to_write;
@@ -337,33 +347,33 @@ const int64_t Rank::getReadyTime(CommandType type, Coordinates &coordinates)
     int64_t clock;
     
     switch (type) {
-        case COMMAND_ACT:
+        case COMMAND_act:
             clock = banks[coordinates.bank]->getReadyTime(type, coordinates);
             clock = std::max(clock, actReadyTime);
             clock = std::max(clock, fawReadyTime[0]);
             
             return clock;
             
-        case COMMAND_PRE:
+        case COMMAND_pre:
             clock = banks[coordinates.bank]->getReadyTime(type, coordinates);
             
             return clock;
             
-        case COMMAND_READ:
-        case COMMAND_READ_PRE:
+        case COMMAND_read:
+        case COMMAND_read_pre:
             clock = banks[coordinates.bank]->getReadyTime(type, coordinates);
             clock = std::max(clock, readReadyTime);
             
             return clock;
             
-        case COMMAND_WRITE:
-        case COMMAND_WRITE_PRE:
+        case COMMAND_write:
+        case COMMAND_write_pre:
             clock = banks[coordinates.bank]->getReadyTime(type, coordinates);
             clock = std::max(clock, writeReadyTime);
             
             return clock;
             
-        case COMMAND_REFRESH:
+        case COMMAND_refresh:
             clock = actReadyTime;
             for (uint8_t i=0; i<config->nBank; ++i) {
                 clock = std::max(clock, banks[i]->getReadyTime(type, coordinates));
@@ -382,7 +392,7 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
     RankTiming &timing = config->timing.rank;
     
     switch (type) {
-        case COMMAND_ACT:
+        case COMMAND_act:
             actReadyTime = clock + timing.act_to_act;
             
             fawReadyTime[0] = fawReadyTime[1];
@@ -392,25 +402,25 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
-        case COMMAND_PRE:
+        case COMMAND_pre:
             
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
-        case COMMAND_READ:
-        case COMMAND_READ_PRE:
+        case COMMAND_read:
+        case COMMAND_read_pre:
             readReadyTime  = clock + timing.read_to_read;
             writeReadyTime = clock + timing.read_to_write;
             
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
-        case COMMAND_WRITE:
-        case COMMAND_WRITE_PRE:
+        case COMMAND_write:
+        case COMMAND_write_pre:
             readReadyTime  = clock + timing.write_to_read;
             writeReadyTime = clock + timing.write_to_write;
             
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
         
-        case COMMAND_REFRESH:
+        case COMMAND_refresh:
             actReadyTime = clock + timing.refresh_to_act;
             
             fawReadyTime[0] = clock + timing.refresh_to_act;
@@ -455,28 +465,28 @@ const int32_t Bank::getRowBuffer(Coordinates &coordinates)
 const int64_t Bank::getReadyTime(CommandType type, Coordinates &coordinates)
 {
     switch (type) {
-        case COMMAND_ACT:
-        case COMMAND_REFRESH:
+        case COMMAND_act:
+        case COMMAND_refresh:
             assert(actReadyTime != -1);
             assert(rowBuffer == -1);
             
             return actReadyTime;
             
-        case COMMAND_PRE:
+        case COMMAND_pre:
             assert(preReadyTime != -1);
             assert(rowBuffer != -1);
             
             return preReadyTime;
             
-        case COMMAND_READ:
-        case COMMAND_READ_PRE:
+        case COMMAND_read:
+        case COMMAND_read_pre:
             assert(readReadyTime != -1);
             assert(rowBuffer == (int32_t)coordinates.row);
             
             return readReadyTime;
             
-        case COMMAND_WRITE:
-        case COMMAND_WRITE_PRE:
+        case COMMAND_write:
+        case COMMAND_write_pre:
             assert(writeReadyTime != -1);
             assert(rowBuffer == (int32_t)coordinates.row);
             
@@ -493,7 +503,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
     BankTiming &timing = config->timing.bank;
     
     switch (type) {
-        case COMMAND_ACT:
+        case COMMAND_act:
             assert(actReadyTime != -1);
             assert(clock >= actReadyTime);
             assert(rowBuffer == -1);
@@ -509,7 +519,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             
             return clock;
             
-        case COMMAND_PRE:
+        case COMMAND_pre:
             assert(preReadyTime != -1);
             assert(clock >= preReadyTime);
             assert(rowBuffer != -1);
@@ -525,17 +535,17 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             
             return clock;
             
-        case COMMAND_READ:
-        case COMMAND_READ_PRE:
+        case COMMAND_read:
+        case COMMAND_read_pre:
             assert(readReadyTime != -1);
             assert(clock >= readReadyTime);
             assert(rowBuffer == (int32_t)coordinates.row);
             
-            if (type == COMMAND_READ) {
+            if (type == COMMAND_read) {
                 actReadyTime   = -1;
                 preReadyTime   = clock + timing.read_to_pre;
-                readReadyTime  = clock; // delay is on rank level
-                writeReadyTime = clock; // delay is on rank level
+                readReadyTime  = clock; // see rank
+                writeReadyTime = clock; // see rank
             } else {
                 actReadyTime   = clock + timing.read_to_pre + timing.pre_to_act;
                 preReadyTime   = -1;
@@ -549,17 +559,17 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             
             return clock + timing.read_to_data;
             
-        case COMMAND_WRITE:
-        case COMMAND_WRITE_PRE:
+        case COMMAND_write:
+        case COMMAND_write_pre:
             assert(writeReadyTime != -1);
             assert(clock >= writeReadyTime);
             assert(rowBuffer == (int32_t)coordinates.row);
             
-            if (type == COMMAND_WRITE) {
+            if (type == COMMAND_write) {
                 actReadyTime   = -1;
                 preReadyTime   = clock + timing.write_to_pre;
-                readReadyTime  = clock; // delay is on rank level
-                writeReadyTime = clock; // delay is on rank level
+                readReadyTime  = clock; // see rank
+                writeReadyTime = clock; // see rank
             } else {
                 actReadyTime   = clock + timing.write_to_pre + timing.pre_to_act;
                 preReadyTime   = -1;
@@ -573,7 +583,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             
             return clock + timing.write_to_data;
         
-        //case COMMAND_REFRESH:
+        //case COMMAND_refresh:
             
         default:
             assert(0);
