@@ -55,6 +55,9 @@ struct BankTiming {
 };
 
 struct Timing {
+    uint32_t transaction_delay;
+    uint32_t command_delay;
+    
     ChannelTiming channel;
     RankTiming rank;
     BankTiming bank;
@@ -71,10 +74,16 @@ struct Energy {
     float powerdown_per_cycle;
 };
 
+struct Policy {
+    uint8_t max_row_idle;
+    uint8_t max_row_hits;
+};
+
 struct Config {    
     AddressMapping mapping;
     Timing timing;
     Energy energy;
+    Policy policy;
     
     uint32_t nChannel;
     uint32_t nRank;
@@ -107,12 +116,14 @@ struct Coordinates {
 
 /** DRAM transaction */
 struct Transaction : public Coordinates {
-    bool is_write;
     uint64_t address;
-    /** Whether all commands of the transaction are in the command queue. */
+    bool is_write;
     bool is_pending;
-    /** Whether all commands of the transaction are completed. */
     bool is_finished;
+    /** The time when the transaction is ready for translating commands. */
+    int64_t readyTime;
+    /** The time when the all commands of the transaction is done. */
+    int64_t finishTime;
     
     friend std::ostream &operator <<(std::ostream &os, Transaction &transaction) {
         os << "{"
@@ -143,7 +154,7 @@ struct Command {
     CommandType type;
     /** The time when the command is sent through a channel. */
     int64_t readyTime;
-    /** The time when the data command is received from a channel. */
+    /** The time when the data is received from or send through a channel. */
     int64_t finishTime;
     /** The cooresponding transaction of the command. */
     Transaction *transaction;
@@ -159,12 +170,17 @@ struct Command {
     }
 };
 
+struct RowBuffer {
+    int32_t tag;
+    uint8_t hits;
+};
+
 class Bank
 {
 protected:
     Config *config;
     
-    int32_t rowBuffer;
+    RowBuffer rowBuffer;
     
     int64_t actReadyTime;
     int64_t preReadyTime;
@@ -180,7 +196,7 @@ public:
     Bank(Config *_config);    
     virtual ~Bank();
     
-    inline const int32_t getRowBuffer(Coordinates &coordinates);
+    inline const RowBuffer &getRowBuffer(Coordinates &coordinates);
     inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
     
@@ -212,7 +228,7 @@ public:
     Rank(Config *_config);
     virtual ~Rank();
     
-    inline const int32_t getRowBuffer(Coordinates &coordinates);
+    inline const RowBuffer &getRowBuffer(Coordinates &coordinates);
     inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
     
@@ -240,7 +256,7 @@ public:
     Channel(Config *_config);
     virtual ~Channel();
     
-    inline const int32_t getRowBuffer(Coordinates &coordinates);
+    inline const RowBuffer &getRowBuffer(Coordinates &coordinates);
     inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
     
@@ -262,8 +278,9 @@ public:
     MemorySystem(Config *_config);
     virtual ~MemorySystem();
     
-    inline const int32_t getRowBuffer(Coordinates &coordinates);
+    inline const RowBuffer &getRowBuffer(Coordinates &coordinates);
     inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
+    
     /** sends out the command and change the state of memory system. */
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
     
@@ -283,6 +300,7 @@ protected:
     
     LinkedList<Transaction> transactionQueue;
     LinkedList<Command>     commandQueue;
+    LinkedList<Coordinates> openBanks;
     
     bool addCommand(int64_t clock, CommandType type, Transaction &transaction);
 

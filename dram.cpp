@@ -23,9 +23,12 @@ Config::Config(std::map<std::string, int> config)
     mapping.row.offset     = offset; offset +=
     mapping.row.width      = config["row"];
     
+    timing.transaction_delay = config["tTQ"];
+    timing.command_delay     = config["tCQ"];
+    
     timing.channel.read_to_read   = config["tBL"]+config["tRTRS"];
     timing.channel.read_to_write  = config["tCL"]+config["tBL"]+config["tRTRS"]-config["tCWL"];
-    timing.channel.write_to_read  = config["tCWL"]+config["tBL"]+config["tRTRS"]-config["tCAS"];
+    timing.channel.write_to_read  = config["tCWL"]+config["tBL"]+config["tRTRS"]-config["tCL"];
     timing.channel.write_to_write = config["tBL"]+config["tRTRS"];
     
     timing.rank.act_to_act     = config["tRRD"];
@@ -44,13 +47,17 @@ Config::Config(std::map<std::string, int> config)
     timing.bank.pre_to_act    = config["tRP"];
     timing.bank.read_to_data  = config["tAL"]+config["tCL"];
     timing.bank.write_to_data = config["tAL"]+config["tCWL"];
+    
+    policy.max_row_idle = 0;
+    policy.max_row_hits = 4;
 }
 
 MemoryController::MemoryController(Config *_config) :
     config(_config),
     states(_config),
     transactionQueue(config->nTransaction),
-    commandQueue(config->nCommand)
+    commandQueue(config->nCommand),
+    openBanks(config->nChannel*config->nRank*config->nBank)
 {
 }
 
@@ -65,11 +72,12 @@ bool MemoryController::addTransaction(uint64_t address, bool is_write)
     
     Transaction &transaction = transactionQueue.push();
     
-    transaction.is_write = is_write;
-    transaction.address  = address;
-    
+    transaction.address     = address;
+    transaction.is_write    = is_write;
     transaction.is_pending  = true;
     transaction.is_finished = false;
+    transaction.readyTime   = -1;
+    transaction.finishTime  = -1;
     
     /** Address mapping scheme goes here. */
     AddressMapping &mapping = config->mapping;
@@ -90,6 +98,7 @@ bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &
     
     int64_t readyTime, finishTime;
     
+    clock = clock + config->timing.command_delay;
     readyTime = std::max(clock, states.getReadyTime(type, transaction));
     /** Uncomment this line to switch from FCFS to FR-FCFS */
     if (readyTime != clock) return false;
@@ -109,34 +118,19 @@ bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &
 
 void MemoryController::cycle(int64_t clock)
 {
+    Policy &policy = config->policy;
+    
     LinkedList<Transaction>::Iterator itq;
     LinkedList<Command>::Iterator icq;
+    LinkedList<Coordinates>::Iterator iob;
     
-    /** Memory scheduler algorithm goes here. */
-    
-    // FCFS or FR-FCFS
     transactionQueue.reset(itq);
     while (transactionQueue.next(itq)) {
         Transaction &transaction = (*itq);
         
-        if (!transaction.is_pending) continue;
-        
-        int64_t rowBuffer = states.getRowBuffer(transaction);
-        
-        if (rowBuffer != -1 && rowBuffer != transaction.row) {
-            if (!addCommand(clock, COMMAND_pre, transaction)) continue;
-            rowBuffer = -1; // getRowBuffer(transaction);
-        }
-        
-        if (rowBuffer == -1) {
-            if (!addCommand(clock, COMMAND_act, transaction)) continue;
-            rowBuffer = transaction.row; // getRowBuffer(transaction);
-        }
-        
-        if (rowBuffer == transaction.row) {
-            CommandType type = transaction.is_write ? COMMAND_write : COMMAND_read;
-            if (!addCommand(clock, type, transaction)) continue;
-            transaction.is_pending = false;
+        // transaction retirement
+        if (transaction.is_finished) {
+            transactionQueue.remove(itq);
         }
     }
     
@@ -152,6 +146,7 @@ void MemoryController::cycle(int64_t clock)
             case COMMAND_read_pre:
             case COMMAND_write_pre:
                 command.transaction->is_finished = true;
+                command.transaction->finishTime  = clock;
                 break;
                 
             default:
@@ -161,12 +156,62 @@ void MemoryController::cycle(int64_t clock)
         commandQueue.remove(icq);
     }
     
+    /** Memory scheduler algorithm goes here. */
+    
+    // FCFS or FR-FCFS
     transactionQueue.reset(itq);
     while (transactionQueue.next(itq)) {
         Transaction &transaction = (*itq);
         
-        if (transaction.is_finished) {
-            transactionQueue.remove(itq);
+        if (!transaction.is_pending) continue;
+        
+        // transaction preprocessing
+        if (transaction.readyTime == -1) {
+            transaction.readyTime = clock + config->timing.transaction_delay;
+        }
+        if (transaction.readyTime > clock) continue;
+        
+        const RowBuffer &rowBuffer = states.getRowBuffer(transaction);
+        bool precharge = false;
+        
+        // Precharge
+        if (rowBuffer.tag != -1 && (rowBuffer.tag != (int32_t)transaction.row || rowBuffer.hits >= policy.max_row_hits)) {
+            if (!addCommand(clock, COMMAND_pre, transaction)) continue;
+            assert(rowBuffer.tag == -1);
+            
+            precharge = true;
+        }
+        
+        // Activation
+        if (rowBuffer.tag == -1) {
+            if (!addCommand(clock, COMMAND_act, transaction)) continue;
+            assert(rowBuffer.tag == (int32_t)transaction.row);
+            
+            if (!precharge) {
+                openBanks.push() = (Coordinates)transaction;
+            }
+        }
+        
+        // Read / Write
+        if (rowBuffer.tag == (int32_t)transaction.row) {
+            CommandType type = transaction.is_write ? COMMAND_write : COMMAND_read;
+            if (!addCommand(clock, type, transaction)) continue;
+            transaction.is_pending = false;
+        }
+    }
+    
+    // Precharge, eagerly
+    openBanks.reset(iob);
+    while (openBanks.next(iob)) {
+        Coordinates &coordinates = (*iob);
+        
+        const RowBuffer &rowBuffer = states.getRowBuffer(coordinates);
+        
+        int64_t idleTime = states.getReadyTime(COMMAND_pre, coordinates);
+        if (clock + config->timing.command_delay >= idleTime + policy.max_row_idle || 
+            rowBuffer.hits >= policy.max_row_hits) {
+            if (!addCommand(clock, COMMAND_pre, (Transaction &)coordinates)) continue;
+            openBanks.remove(iob);
         }
     }
 }
@@ -188,7 +233,7 @@ MemorySystem::~MemorySystem()
     delete [] channels;
 }
 
-const int32_t MemorySystem::getRowBuffer(Coordinates &coordinates)
+const RowBuffer &MemorySystem::getRowBuffer(Coordinates &coordinates)
 {
     return channels[coordinates.channel]->getRowBuffer(coordinates);
 }
@@ -226,7 +271,7 @@ Channel::~Channel()
     delete [] ranks;
 }
 
-const int32_t Channel::getRowBuffer(Coordinates &coordinates)
+const RowBuffer &Channel::getRowBuffer(Coordinates &coordinates)
 {
     return ranks[coordinates.rank]->getRowBuffer(coordinates);
 }
@@ -337,7 +382,7 @@ Rank::~Rank()
     delete [] banks;
 }
 
-const int32_t Rank::getRowBuffer(Coordinates &coordinates)
+const RowBuffer &Rank::getRowBuffer(Coordinates &coordinates)
 {
     return banks[coordinates.bank]->getRowBuffer(coordinates);
 }
@@ -439,7 +484,7 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
 Bank::Bank(Config *_config) :
     config(_config)
 {
-    rowBuffer = -1;
+    rowBuffer.tag = -1;
     
     actReadyTime   = 0;
     preReadyTime   = -1;
@@ -457,7 +502,7 @@ Bank::~Bank()
 {
 }
 
-const int32_t Bank::getRowBuffer(Coordinates &coordinates)
+const RowBuffer &Bank::getRowBuffer(Coordinates &coordinates)
 {
     return rowBuffer;
 }
@@ -468,27 +513,27 @@ const int64_t Bank::getReadyTime(CommandType type, Coordinates &coordinates)
         case COMMAND_act:
         case COMMAND_refresh:
             assert(actReadyTime != -1);
-            assert(rowBuffer == -1);
+            assert(rowBuffer.tag == -1);
             
             return actReadyTime;
             
         case COMMAND_pre:
             assert(preReadyTime != -1);
-            assert(rowBuffer != -1);
+            assert(rowBuffer.tag != -1);
             
             return preReadyTime;
             
         case COMMAND_read:
         case COMMAND_read_pre:
             assert(readReadyTime != -1);
-            assert(rowBuffer == (int32_t)coordinates.row);
+            assert(rowBuffer.tag == (int32_t)coordinates.row);
             
             return readReadyTime;
             
         case COMMAND_write:
         case COMMAND_write_pre:
             assert(writeReadyTime != -1);
-            assert(rowBuffer == (int32_t)coordinates.row);
+            assert(rowBuffer.tag == (int32_t)coordinates.row);
             
             return writeReadyTime;
             
@@ -506,9 +551,10 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
         case COMMAND_act:
             assert(actReadyTime != -1);
             assert(clock >= actReadyTime);
-            assert(rowBuffer == -1);
+            assert(rowBuffer.tag == -1);
             
-            rowBuffer = coordinates.row;
+            rowBuffer.tag = (int32_t)coordinates.row;
+            rowBuffer.hits = 0;
             
             actReadyTime   = -1;
             preReadyTime   = clock + timing.act_to_pre;
@@ -522,9 +568,9 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
         case COMMAND_pre:
             assert(preReadyTime != -1);
             assert(clock >= preReadyTime);
-            assert(rowBuffer != -1);
+            assert(rowBuffer.tag != -1);
             
-            rowBuffer = -1;
+            rowBuffer.tag = -1;
             
             actReadyTime   = clock + timing.pre_to_act;
             preReadyTime   = -1;
@@ -539,13 +585,15 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
         case COMMAND_read_pre:
             assert(readReadyTime != -1);
             assert(clock >= readReadyTime);
-            assert(rowBuffer == (int32_t)coordinates.row);
+            assert(rowBuffer.tag == (int32_t)coordinates.row);
+            
+            rowBuffer.hits += 1;
             
             if (type == COMMAND_read) {
                 actReadyTime   = -1;
-                preReadyTime   = clock + timing.read_to_pre;
-                readReadyTime  = clock; // see rank
-                writeReadyTime = clock; // see rank
+                preReadyTime   = std::max(preReadyTime, clock + timing.read_to_pre);
+                // see rank for readReadyTime
+                // see rank for writeReadyTime
             } else {
                 actReadyTime   = clock + timing.read_to_pre + timing.pre_to_act;
                 preReadyTime   = -1;
@@ -563,13 +611,15 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
         case COMMAND_write_pre:
             assert(writeReadyTime != -1);
             assert(clock >= writeReadyTime);
-            assert(rowBuffer == (int32_t)coordinates.row);
+            assert(rowBuffer.tag == (int32_t)coordinates.row);
+            
+            rowBuffer.hits += 1;
             
             if (type == COMMAND_write) {
                 actReadyTime   = -1;
-                preReadyTime   = clock + timing.write_to_pre;
-                readReadyTime  = clock; // see rank
-                writeReadyTime = clock; // see rank
+                preReadyTime   = std::max(preReadyTime, clock + timing.write_to_pre);
+                // see rank for readReadyTime
+                // see rank for writeReadyTime
             } else {
                 actReadyTime   = clock + timing.write_to_pre + timing.pre_to_act;
                 preReadyTime   = -1;

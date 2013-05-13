@@ -20,6 +20,9 @@ int main(int argc, char *argv[])
     settings["column"]  = 7;
     settings["line"]    = 6;
     
+    settings["tTQ"]   = 1;
+    settings["tCQ"]   = 2;
+    
     settings["tCL"]   = 5;
     settings["tCWL"]  = 4;
     settings["tAL"]   = 0;
@@ -46,22 +49,21 @@ int main(int argc, char *argv[])
     
     uint32_t address;
     char command[64], line[256];
-    uint32_t clock, time, delay;
+    uint32_t clock, time;
     bool is_write;
-    clock = delay = 0;
-    while(fgets(line, sizeof(line), file) && clock+delay < 1000) {
+    clock = 0;
+    while(fgets(line, sizeof(line), file) && clock < 1000) {
         sscanf(line, "0x%x %s %d", &address, command, &time);
         is_write = strcmp(command, "WRITE") == 0;
         while (clock < time) {
-            mc->cycle(clock+delay);
+            mc->cycle(clock);
             clock += 1;
         }
         while (!mc->addTransaction(address, is_write)) {
-            mc->cycle(clock+delay);
-            delay += 1;
+            mc->cycle(clock);
+            clock += 1;
         }
     }
-    printf("delay: %d\n", delay);
     
     fclose(file);
     
