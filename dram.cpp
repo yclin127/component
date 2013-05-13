@@ -63,7 +63,7 @@ bool MemoryController::addTransaction(uint64_t address, bool is_write)
     if (transactionQueue.is_full())
         return false;
     
-    Transaction &transaction = transactionQueue.enque();
+    Transaction &transaction = transactionQueue.push();
     
     transaction.is_write = is_write;
     transaction.address  = address;
@@ -95,7 +95,7 @@ bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &
     if (readyTime != clock) return false;
     finishTime = states.getFinishTime(readyTime, type, transaction);
     
-    Command &command = commandQueue.enque();
+    Command &command = commandQueue.push();
     
     command.type        = type;
     command.readyTime   = readyTime;

@@ -8,11 +8,6 @@ using namespace DRAM;
 
 int main(int argc, char *argv[])
 {
-    int bound = 1000;
-    LinkedList<int> sieve(bound);
-    for (int i=1; i<=bound; ++i) {
-    }
-    
     std::map<std::string, int> settings;
     
     settings["transaction"] = 64;

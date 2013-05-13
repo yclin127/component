@@ -60,9 +60,21 @@ struct Timing {
     BankTiming bank;
 };
 
+struct Energy {
+    float act;
+    float pre;
+    float read;
+    float write;
+    float refresh;
+    
+    float powerup_per_cycle;
+    float powerdown_per_cycle;
+};
+
 struct Config {    
     AddressMapping mapping;
     Timing timing;
+    Energy energy;
     
     uint32_t nChannel;
     uint32_t nRank;

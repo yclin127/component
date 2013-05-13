@@ -22,8 +22,12 @@ public:
         delete [] this->m_data;
     }
     
-    DataType &enque() { assert(0); }
-    DataType &deque() { assert(0); }
+    DataType &first() { assert(0); }
+    DataType &last() { assert(0); }
+    DataType &push() { assert(0); }
+    DataType &pop() { assert(0); }
+    DataType &shift() { assert(0); }
+    DataType &unshift() { assert(0); }
     
     const bool is_full() {
         return this->m_length == this->m_size;
@@ -47,41 +51,6 @@ public:
 };
 
 template<class DataType>
-class Stack : public Container<DataType>
-{
-public:
-    Stack(int size) : Container<DataType>(size) {
-    }
-    
-    ~Stack() {
-    }
-    
-    DataType &operator [](int index) {
-        assert(index >=0 && index < this->length);
-        
-        return this->data[this->length-index-1];
-    }
-    
-    DataType &enque() {
-        assert(this->m_length < this->size);
-        
-        DataType &data = this->m_data[this->m_length];
-        this->m_length += 1;
-        
-        return data;
-    }
-    
-    DataType &deque() {
-        assert(this->m_length > 0);
-        
-        DataType &data = this->m_data[this->m_length-1];
-        this->m_length -= 1;
-        
-        return data;
-    }
-};
-
-template<class DataType>
 class Queue : public Container<DataType>
 {
 protected:
@@ -101,19 +70,38 @@ public:
         return this->m_data[(this->m_cursor+index)%this->m_size];
     }
     
-    DataType &enque() {
-        assert(this->m_length < this->size);
-        
-        DataType &data = this->m_data[(this->m_cursor+this->m_length)%this->m_size];
+    DataType &first() {
+        return (*this)[0];
+    }
+    
+    DataType &last() {
+        return (*this)[this->length-1];
+    }
+    
+    DataType &push() {
         this->m_length += 1;
+        DataType &data = (*this)[this->m_length-1];
         
         return data;
     }
     
-    DataType &deque() {
-        assert(this->m_length > 0);
+    DataType &pop() {
+        DataType &data = (*this)[this->m_length-1];
+        this->m_length -= 1;
         
-        DataType &data = this->m_data[this->m_cursor];
+        return data;
+    }
+    
+    DataType &unshift() {
+        this->m_cursor = (this->m_cursor+this->m_size-1)%this->m_size;
+        this->m_length += 1;
+        DataType &data = (*this)[0];
+        
+        return data;
+    }
+    
+    DataType &shift() {
+        DataType &data = this->m_data[0];
         this->m_cursor = (this->m_cursor+1)%this->m_size;
         this->m_length -= 1;
         
@@ -157,7 +145,19 @@ public:
         delete [] this->m_nodes;
     }
     
-    DataType &enque() {
+    DataType &first() {
+        assert(this->m_length > 0);
+        
+        return *(this->m_head->data);
+    }
+    
+    DataType &last() {
+        assert(this->m_length > 0);
+        
+        return *(this->m_tail->data);
+    }
+    
+    DataType &push() {
         assert(this->m_length < this->m_size);
         
         Node *node = this->m_free;
@@ -176,7 +176,26 @@ public:
         return *(node->data);
     }
     
-    DataType &deque() {
+    DataType &unshift() {
+        assert(this->m_length < this->m_size);
+        
+        Node *node = this->m_free;
+        this->m_free = this->m_free->next;
+        node->next = NULL;
+        
+        if (this->m_head == NULL) {
+            this->m_head = node;
+            this->m_tail = node;
+        } else {
+            node->next = this->m_head;
+            this->m_head = node;
+        }
+        this->m_length += 1;
+        
+        return *(node->data);
+    }
+    
+    DataType &shift() {
         assert(this->m_length > 0);
         
         Node *node = this->m_head;
