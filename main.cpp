@@ -20,6 +20,9 @@ int main(int argc, char *argv[])
     settings["column"]  = 7;
     settings["line"]    = 6;
     
+    settings["max_row_idle"] = 0;
+    settings["max_row_hits"] = 4;
+    
     settings["tTQ"]   = 1;
     settings["tCQ"]   = 2;
     
@@ -52,7 +55,7 @@ int main(int argc, char *argv[])
     uint32_t clock, time;
     bool is_write;
     clock = 0;
-    while(fgets(line, sizeof(line), file) && clock < 1000) {
+    while(fgets(line, sizeof(line), file)) {
         sscanf(line, "0x%x %s %d", &address, command, &time);
         is_write = strcmp(command, "WRITE") == 0;
         while (clock < time) {

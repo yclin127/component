@@ -64,6 +64,12 @@ struct Timing {
 };
 
 struct Energy {
+    float clock_per_cycle;
+    float command_bus;
+    float row_address_bus;
+    float col_address_bus;
+    float data_bus;
+    
     float act;
     float pre;
     float read;
@@ -173,6 +179,7 @@ struct Command {
 struct RowBuffer {
     int32_t tag;
     uint8_t hits;
+    bool is_busy;
 };
 
 class Bank
@@ -196,7 +203,7 @@ public:
     Bank(Config *_config);    
     virtual ~Bank();
     
-    inline const RowBuffer &getRowBuffer(Coordinates &coordinates);
+    inline RowBuffer &getRowBuffer(Coordinates &coordinates);
     inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
     
@@ -224,11 +231,19 @@ protected:
     int64_t writeReadyTime;
     int64_t wakeupReadyTime;
     
+    float actEnergy;
+    float preEnergy;
+    float readEnergy;
+    float writeEnergy;
+    float refreshEnergy;
+    float powerupEnergy;
+    float powerdownEnergy;
+    
 public:
     Rank(Config *_config);
     virtual ~Rank();
     
-    inline const RowBuffer &getRowBuffer(Coordinates &coordinates);
+    inline RowBuffer &getRowBuffer(Coordinates &coordinates);
     inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
     
@@ -252,11 +267,16 @@ protected:
     int64_t readReadyTime;
     int64_t writeReadyTime;
     
+    float clockEnergy;
+    float commandBusEnergy;
+    float addressBusEnergy;
+    float dataBusEnergy;
+    
 public:
     Channel(Config *_config);
     virtual ~Channel();
     
-    inline const RowBuffer &getRowBuffer(Coordinates &coordinates);
+    inline RowBuffer &getRowBuffer(Coordinates &coordinates);
     inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
     
@@ -278,7 +298,7 @@ public:
     MemorySystem(Config *_config);
     virtual ~MemorySystem();
     
-    inline const RowBuffer &getRowBuffer(Coordinates &coordinates);
+    inline RowBuffer &getRowBuffer(Coordinates &coordinates);
     inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     
     /** sends out the command and change the state of memory system. */
@@ -296,11 +316,13 @@ class MemoryController
 protected:
     Config *config;
     
-    MemorySystem states;
+    MemorySystem system;
     
     LinkedList<Transaction> transactionQueue;
     LinkedList<Command>     commandQueue;
-    LinkedList<Coordinates> openBanks;
+    
+    /** keep trace of all opened banks. */
+    LinkedList<Coordinates> bankList;
     
     bool addCommand(int64_t clock, CommandType type, Transaction &transaction);
 

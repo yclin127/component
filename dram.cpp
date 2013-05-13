@@ -4,60 +4,64 @@ using namespace DRAM;
 
 Config::Config(std::map<std::string, int> config)
 {
-    nTransaction = config["transaction"];
-    nCommand     = config["command"];
+#define _(key) config[#key]
+
+    nTransaction = _(transaction);
+    nCommand     = _(command);
     
-    nChannel = 1 << config["channel"];
-    nRank    = 1 << config["rank"];
-    nBank    = 1 << config["bank"];
+    nChannel = 1 << _(channel);
+    nRank    = 1 << _(rank);
+    nBank    = 1 << _(bank);
     
-    uint8_t offset = config["line"];
+    uint8_t offset = _(line);
     mapping.channel.offset = offset; offset +=
-    mapping.channel.width  = config["channel"];
+    mapping.channel.width  = _(channel);
     mapping.column.offset  = offset; offset +=
-    mapping.column.width   = config["column"];
+    mapping.column.width   = _(column);
     mapping.bank.offset    = offset; offset +=
-    mapping.bank.width     = config["bank"];
+    mapping.bank.width     = _(bank);
     mapping.rank.offset    = offset; offset +=
-    mapping.rank.width     = config["rank"];   
+    mapping.rank.width     = _(rank);   
     mapping.row.offset     = offset; offset +=
-    mapping.row.width      = config["row"];
+    mapping.row.width      = _(row);
     
-    timing.transaction_delay = config["tTQ"];
-    timing.command_delay     = config["tCQ"];
+    policy.max_row_idle = _(max_row_idle);
+    policy.max_row_hits = _(max_row_hits);
     
-    timing.channel.read_to_read   = config["tBL"]+config["tRTRS"];
-    timing.channel.read_to_write  = config["tCL"]+config["tBL"]+config["tRTRS"]-config["tCWL"];
-    timing.channel.write_to_read  = config["tCWL"]+config["tBL"]+config["tRTRS"]-config["tCL"];
-    timing.channel.write_to_write = config["tBL"]+config["tRTRS"];
+    timing.transaction_delay = _(tTQ);
+    timing.command_delay     = _(tCQ);
     
-    timing.rank.act_to_act     = config["tRRD"];
-    timing.rank.act_to_faw     = config["tFAW"];
-    timing.rank.read_to_read   = std::max(config["tBL"], config["tCCD"]);
-    timing.rank.read_to_write  = config["tCL"]+config["tBL"]+config["tRTRS"]-config["tCWL"];
-    timing.rank.write_to_read  = config["tCWL"]+config["tBL"]+config["tWTR"];
-    timing.rank.write_to_write = std::max(config["tBL"], config["tCCD"]);
-    timing.rank.refresh_to_act = config["tRFC"];
+    timing.channel.read_to_read   = _(tBL)+_(tRTRS);
+    timing.channel.read_to_write  = _(tCL)+_(tBL)+_(tRTRS)-_(tCWL);
+    timing.channel.write_to_read  = _(tCWL)+_(tBL)+_(tRTRS)-_(tCL);
+    timing.channel.write_to_write = _(tBL)+_(tRTRS);
     
-    timing.bank.act_to_read   = config["tRCD"]-config["tAL"];
-    timing.bank.act_to_write  = config["tRCD"]-config["tAL"];
-    timing.bank.act_to_pre    = config["tRAS"];
-    timing.bank.read_to_pre   = config["tAL"]+config["tBL"]+std::max(config["tRTP"]-config["tCCD"], 0);
-    timing.bank.write_to_pre  = config["tAL"]+config["tCWL"]+config["tBL"]+config["tWR"];
-    timing.bank.pre_to_act    = config["tRP"];
-    timing.bank.read_to_data  = config["tAL"]+config["tCL"];
-    timing.bank.write_to_data = config["tAL"]+config["tCWL"];
+    timing.rank.act_to_act     = _(tRRD);
+    timing.rank.act_to_faw     = _(tFAW);
+    timing.rank.read_to_read   = std::max(_(tBL), _(tCCD));
+    timing.rank.read_to_write  = _(tCL)+_(tBL)+_(tRTRS)-_(tCWL);
+    timing.rank.write_to_read  = _(tCWL)+_(tBL)+_(tWTR);
+    timing.rank.write_to_write = std::max(_(tBL), _(tCCD));
+    timing.rank.refresh_to_act = _(tRFC);
     
-    policy.max_row_idle = 0;
-    policy.max_row_hits = 4;
+    timing.bank.act_to_read   = _(tRCD)-_(tAL);
+    timing.bank.act_to_write  = _(tRCD)-_(tAL);
+    timing.bank.act_to_pre    = _(tRAS);
+    timing.bank.read_to_pre   = _(tAL)+_(tBL)+std::max(_(tRTP)-_(tCCD), 0);
+    timing.bank.write_to_pre  = _(tAL)+_(tCWL)+_(tBL)+_(tWR);
+    timing.bank.pre_to_act    = _(tRP);
+    timing.bank.read_to_data  = _(tAL)+_(tCL);
+    timing.bank.write_to_data = _(tAL)+_(tCWL);
+
+#undef _
 }
 
 MemoryController::MemoryController(Config *_config) :
     config(_config),
-    states(_config),
+    system(_config),
     transactionQueue(config->nTransaction),
     commandQueue(config->nCommand),
-    openBanks(config->nChannel*config->nRank*config->nBank)
+    bankList((int)config->nChannel*config->nRank*config->nBank)
 {
 }
 
@@ -99,10 +103,10 @@ bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &
     int64_t readyTime, finishTime;
     
     clock = clock + config->timing.command_delay;
-    readyTime = std::max(clock, states.getReadyTime(type, transaction));
+    readyTime = std::max(clock, system.getReadyTime(type, transaction));
     /** Uncomment this line to switch from FCFS to FR-FCFS */
     if (readyTime != clock) return false;
-    finishTime = states.getFinishTime(readyTime, type, transaction);
+    finishTime = system.getFinishTime(readyTime, type, transaction);
     
     Command &command = commandQueue.push();
     
@@ -111,7 +115,7 @@ bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &
     command.finishTime  = finishTime;
     command.transaction = &transaction;
     
-    std::cerr << command << std::endl;
+    //std::cerr << command << std::endl;
     
     return true;
 }
@@ -171,15 +175,13 @@ void MemoryController::cycle(int64_t clock)
         }
         if (transaction.readyTime > clock) continue;
         
-        const RowBuffer &rowBuffer = states.getRowBuffer(transaction);
-        bool precharge = false;
+        RowBuffer &rowBuffer = system.getRowBuffer(transaction);
         
         // Precharge
-        if (rowBuffer.tag != -1 && (rowBuffer.tag != (int32_t)transaction.row || rowBuffer.hits >= policy.max_row_hits)) {
+        if (rowBuffer.tag != -1 && (rowBuffer.tag != (int32_t)transaction.row || 
+            rowBuffer.hits >= policy.max_row_hits)) {
             if (!addCommand(clock, COMMAND_pre, transaction)) continue;
             assert(rowBuffer.tag == -1);
-            
-            precharge = true;
         }
         
         // Activation
@@ -187,8 +189,10 @@ void MemoryController::cycle(int64_t clock)
             if (!addCommand(clock, COMMAND_act, transaction)) continue;
             assert(rowBuffer.tag == (int32_t)transaction.row);
             
-            if (!precharge) {
-                openBanks.push() = (Coordinates)transaction;
+            RowBuffer &rowBuffer = system.getRowBuffer(transaction);
+            if (!rowBuffer.is_busy) {
+                bankList.push() = (Coordinates)transaction;
+                rowBuffer.is_busy = true;
             }
         }
         
@@ -200,18 +204,24 @@ void MemoryController::cycle(int64_t clock)
         }
     }
     
-    // Precharge, eagerly
-    openBanks.reset(iob);
-    while (openBanks.next(iob)) {
+    // early Precharge
+    bankList.reset(iob);
+    while (bankList.next(iob)) {
         Coordinates &coordinates = (*iob);
         
-        const RowBuffer &rowBuffer = states.getRowBuffer(coordinates);
+        RowBuffer &rowBuffer = system.getRowBuffer(coordinates);
+        assert(rowBuffer.is_busy);
+        // bank been precharged for another row activation.
+        if (rowBuffer.tag == -1) {
+            continue;
+        }
         
-        int64_t idleTime = states.getReadyTime(COMMAND_pre, coordinates);
+        int64_t idleTime = system.getReadyTime(COMMAND_pre, coordinates);
         if (clock + config->timing.command_delay >= idleTime + policy.max_row_idle || 
             rowBuffer.hits >= policy.max_row_hits) {
             if (!addCommand(clock, COMMAND_pre, (Transaction &)coordinates)) continue;
-            openBanks.remove(iob);
+            bankList.remove(iob);
+            rowBuffer.is_busy = false;
         }
     }
 }
@@ -233,7 +243,7 @@ MemorySystem::~MemorySystem()
     delete [] channels;
 }
 
-const RowBuffer &MemorySystem::getRowBuffer(Coordinates &coordinates)
+RowBuffer &MemorySystem::getRowBuffer(Coordinates &coordinates)
 {
     return channels[coordinates.channel]->getRowBuffer(coordinates);
 }
@@ -261,6 +271,11 @@ Channel::Channel(Config *_config) :
     anyReadyTime   = 0;
     readReadyTime  = 0;
     writeReadyTime = 0;
+    
+    clockEnergy      = 0;
+    commandBusEnergy = 0;
+    addressBusEnergy = 0;
+    dataBusEnergy    = 0;
 }
 
 Channel::~Channel()
@@ -271,7 +286,7 @@ Channel::~Channel()
     delete [] ranks;
 }
 
-const RowBuffer &Channel::getRowBuffer(Coordinates &coordinates)
+RowBuffer &Channel::getRowBuffer(Coordinates &coordinates)
 {
     return ranks[coordinates.rank]->getRowBuffer(coordinates);
 }
@@ -318,12 +333,18 @@ const int64_t Channel::getReadyTime(CommandType type, Coordinates &coordinates)
 int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates)
 {
     ChannelTiming &timing = config->timing.channel;
+    Energy &energy = config->energy;
     
     switch (type) {
         case COMMAND_act:
         case COMMAND_refresh:
         case COMMAND_pre:
             anyReadyTime   = clock + 1;
+            
+            commandBusEnergy += energy.command_bus;
+            if (type == COMMAND_act) {
+                addressBusEnergy += energy.row_address_bus;
+            }
             
             return ranks[coordinates.rank]->getFinishTime(clock, type, coordinates);
             
@@ -332,6 +353,10 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
             anyReadyTime   = clock + 1;
             readReadyTime  = clock + timing.read_to_read;
             writeReadyTime = clock + timing.read_to_write;
+            
+            commandBusEnergy += energy.command_bus;
+            addressBusEnergy += energy.col_address_bus;
+            dataBusEnergy    += energy.data_bus;
             
             rankSelect = coordinates.rank;
             
@@ -342,6 +367,10 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
             anyReadyTime   = clock + 1;
             readReadyTime  = clock + timing.write_to_read;
             writeReadyTime = clock + timing.write_to_write;
+            
+            commandBusEnergy += energy.command_bus;
+            addressBusEnergy += energy.col_address_bus;
+            dataBusEnergy    += energy.data_bus;
             
             rankSelect = coordinates.rank;
             
@@ -372,6 +401,14 @@ Rank::Rank(Config *_config) :
     readReadyTime    = 0;
     writeReadyTime   = 0;
     wakeupReadyTime  = 0;
+    
+    actEnergy       = 0;
+    preEnergy       = 0;
+    readEnergy      = 0;
+    writeEnergy     = 0;
+    refreshEnergy   = 0;
+    powerupEnergy   = 0;
+    powerdownEnergy = 0;
 }
 
 Rank::~Rank()
@@ -382,7 +419,7 @@ Rank::~Rank()
     delete [] banks;
 }
 
-const RowBuffer &Rank::getRowBuffer(Coordinates &coordinates)
+RowBuffer &Rank::getRowBuffer(Coordinates &coordinates)
 {
     return banks[coordinates.bank]->getRowBuffer(coordinates);
 }
@@ -435,6 +472,7 @@ const int64_t Rank::getReadyTime(CommandType type, Coordinates &coordinates)
 int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates)
 {
     RankTiming &timing = config->timing.rank;
+    Energy &energy = config->energy;
     
     switch (type) {
         case COMMAND_act:
@@ -445,9 +483,12 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             fawReadyTime[2] = fawReadyTime[3];
             fawReadyTime[3] = clock + timing.act_to_faw;
             
+            actEnergy += energy.act;
+            
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
         case COMMAND_pre:
+            preEnergy += energy.pre;
             
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
@@ -456,12 +497,22 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             readReadyTime  = clock + timing.read_to_read;
             writeReadyTime = clock + timing.read_to_write;
             
+            readEnergy += energy.read;
+            if (type == COMMAND_read_pre) {
+                preEnergy += energy.pre;
+            }
+            
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
         case COMMAND_write:
         case COMMAND_write_pre:
             readReadyTime  = clock + timing.write_to_read;
             writeReadyTime = clock + timing.write_to_write;
+            
+            writeEnergy += energy.write;
+            if (type == COMMAND_write_pre) {
+                preEnergy += energy.pre;
+            }
             
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
         
@@ -472,6 +523,8 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             fawReadyTime[1] = clock + timing.refresh_to_act;
             fawReadyTime[2] = clock + timing.refresh_to_act;
             fawReadyTime[3] = clock + timing.refresh_to_act;
+            
+            refreshEnergy += energy.refresh;
             
             return clock + timing.refresh_to_act; 
             
@@ -485,6 +538,8 @@ Bank::Bank(Config *_config) :
     config(_config)
 {
     rowBuffer.tag = -1;
+    rowBuffer.hits = 0;
+    rowBuffer.is_busy = false;
     
     actReadyTime   = 0;
     preReadyTime   = -1;
@@ -502,7 +557,7 @@ Bank::~Bank()
 {
 }
 
-const RowBuffer &Bank::getRowBuffer(Coordinates &coordinates)
+RowBuffer &Bank::getRowBuffer(Coordinates &coordinates)
 {
     return rowBuffer;
 }
