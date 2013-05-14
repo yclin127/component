@@ -64,20 +64,19 @@ struct Timing {
 };
 
 struct Energy {
-    float clock_per_cycle;
-    float command_bus;
-    float row_address_bus;
-    float col_address_bus;
-    float data_bus;
+    uint32_t clock_per_cycle;
+    uint32_t command_bus;
+    uint32_t row_address_bus;
+    uint32_t col_address_bus;
+    uint32_t data_bus;
     
-    float act;
-    float pre;
-    float read;
-    float write;
-    float refresh;
+    uint32_t act;
+    uint32_t read;
+    uint32_t write;
+    uint32_t refresh;
     
-    float powerup_per_cycle;
-    float powerdown_per_cycle;
+    uint32_t powerup_per_cycle;
+    uint32_t powerdown_per_cycle;
 };
 
 struct Policy {
@@ -194,25 +193,13 @@ protected:
     int64_t readReadyTime;
     int64_t writeReadyTime;
     
-    uint32_t actCount;
-    uint32_t preCount;
-    uint32_t readCount;
-    uint32_t writeCount;
-    
 public:
     Bank(Config *_config);    
     virtual ~Bank();
     
     inline RowBuffer &getRowBuffer(Coordinates &coordinates);
-    inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
+    inline int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
-    
-    friend std::ostream &operator <<(std::ostream &os, Bank &bank) {
-        os << "{" << "access: " << (bank.readCount+bank.writeCount)
-           << ", act: " << bank.actCount << ", pre: " << bank.preCount 
-           << ", read: " << bank.readCount << ", write: " << bank.writeCount << "}";
-        return os;
-    }
 };
 
 class Rank
@@ -231,27 +218,21 @@ protected:
     int64_t writeReadyTime;
     int64_t wakeupReadyTime;
     
-    float actEnergy;
-    float preEnergy;
-    float readEnergy;
-    float writeEnergy;
-    float refreshEnergy;
-    float powerupEnergy;
-    float powerdownEnergy;
+    uint64_t actEnergy;
+    uint64_t preEnergy;
+    uint64_t readEnergy;
+    uint64_t writeEnergy;
+    uint64_t refreshEnergy;
+    uint64_t powerupEnergy;
+    uint64_t powerdownEnergy;
     
 public:
     Rank(Config *_config);
     virtual ~Rank();
     
     inline RowBuffer &getRowBuffer(Coordinates &coordinates);
-    inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
+    inline int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
-    
-    friend std::ostream &operator <<(std::ostream &os, Rank &rank) {
-        for (int i=0; i<(int)rank.config->nBank; ++i) 
-            os << "      - bank " << i << ": " << *(rank.banks[i]) << "\n";
-        return os;
-    }
 };
 
 class Channel
@@ -267,24 +248,18 @@ protected:
     int64_t readReadyTime;
     int64_t writeReadyTime;
     
-    float clockEnergy;
-    float commandBusEnergy;
-    float addressBusEnergy;
-    float dataBusEnergy;
+    uint64_t clockEnergy;
+    uint64_t commandBusEnergy;
+    uint64_t addressBusEnergy;
+    uint64_t dataBusEnergy;
     
 public:
     Channel(Config *_config);
     virtual ~Channel();
     
     inline RowBuffer &getRowBuffer(Coordinates &coordinates);
-    inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
+    inline int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
-    
-    friend std::ostream &operator <<(std::ostream &os, Channel &channel) {
-        for (int i=0; i<(int)channel.config->nRank; ++i) 
-            os << "    - rank " << i << ":\n" << *(channel.ranks[i]);
-        return os;
-    }
 };
 
 class MemorySystem
@@ -299,16 +274,10 @@ public:
     virtual ~MemorySystem();
     
     inline RowBuffer &getRowBuffer(Coordinates &coordinates);
-    inline const int64_t getReadyTime(CommandType type, Coordinates &coordinates);
+    inline int64_t getReadyTime(CommandType type, Coordinates &coordinates);
     
     /** sends out the command and change the state of memory system. */
     inline int64_t getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates);
-    
-    friend std::ostream &operator <<(std::ostream &os, MemorySystem &system) {
-        for (int i=0; i<(int)system.config->nChannel; ++i) 
-            os << "  - channel " << i << ":\n" << *(system.channels[i]);
-        return os;
-    }
 };
 
 class MemoryController

@@ -52,6 +52,11 @@ Config::Config(std::map<std::string, int> config)
     timing.bank.pre_to_act    = _(tRP);
     timing.bank.read_to_data  = _(tAL)+_(tCL);
     timing.bank.write_to_data = _(tAL)+_(tCWL);
+    
+    energy.act     = (((_(IDD0)-_(IDD3N))*_(tRAS))+((_(IDD0)-_(IDD2N))*_(tRP)))*_(devices);
+    energy.read    = (_(IDD4R)-_(IDD3N))*_(tBL)*_(devices);
+    energy.write   = (_(IDD4W)-_(IDD3N))*_(tBL)*_(devices);
+    energy.refresh = (_(IDD5)-_(IDD3N))*_(tRFC)*_(devices);
 
 #undef _
 }
@@ -248,7 +253,7 @@ RowBuffer &MemorySystem::getRowBuffer(Coordinates &coordinates)
     return channels[coordinates.channel]->getRowBuffer(coordinates);
 }
 
-const int64_t MemorySystem::getReadyTime(CommandType type, Coordinates &coordinates)
+int64_t MemorySystem::getReadyTime(CommandType type, Coordinates &coordinates)
 {
     return channels[coordinates.channel]->getReadyTime(type, coordinates);
 }
@@ -291,7 +296,7 @@ RowBuffer &Channel::getRowBuffer(Coordinates &coordinates)
     return ranks[coordinates.rank]->getRowBuffer(coordinates);
 }
 
-const int64_t Channel::getReadyTime(CommandType type, Coordinates &coordinates)
+int64_t Channel::getReadyTime(CommandType type, Coordinates &coordinates)
 {
     int64_t clock;
     
@@ -424,7 +429,7 @@ RowBuffer &Rank::getRowBuffer(Coordinates &coordinates)
     return banks[coordinates.bank]->getRowBuffer(coordinates);
 }
 
-const int64_t Rank::getReadyTime(CommandType type, Coordinates &coordinates)
+int64_t Rank::getReadyTime(CommandType type, Coordinates &coordinates)
 {
     int64_t clock;
     
@@ -488,8 +493,6 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
         case COMMAND_pre:
-            preEnergy += energy.pre;
-            
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
         case COMMAND_read:
@@ -498,9 +501,6 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             writeReadyTime = clock + timing.read_to_write;
             
             readEnergy += energy.read;
-            if (type == COMMAND_read_pre) {
-                preEnergy += energy.pre;
-            }
             
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
@@ -510,9 +510,6 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             writeReadyTime = clock + timing.write_to_write;
             
             writeEnergy += energy.write;
-            if (type == COMMAND_write_pre) {
-                preEnergy += energy.pre;
-            }
             
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
         
@@ -545,12 +542,6 @@ Bank::Bank(Config *_config) :
     preReadyTime   = -1;
     readReadyTime  = -1;
     writeReadyTime = -1;
-    
-    
-    actCount   = 0;
-    preCount   = 0;
-    readCount  = 0;
-    writeCount = 0;
 }
 
 Bank::~Bank()
@@ -562,7 +553,7 @@ RowBuffer &Bank::getRowBuffer(Coordinates &coordinates)
     return rowBuffer;
 }
 
-const int64_t Bank::getReadyTime(CommandType type, Coordinates &coordinates)
+int64_t Bank::getReadyTime(CommandType type, Coordinates &coordinates)
 {
     switch (type) {
         case COMMAND_act:
@@ -616,8 +607,6 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             readReadyTime  = clock + timing.act_to_read;
             writeReadyTime = clock + timing.act_to_write;
             
-            actCount += 1;
-            
             return clock;
             
         case COMMAND_pre:
@@ -631,8 +620,6 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             preReadyTime   = -1;
             readReadyTime  = -1;
             writeReadyTime = -1;
-            
-            preCount += 1;
             
             return clock;
             
@@ -654,11 +641,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
                 preReadyTime   = -1;
                 readReadyTime  = -1;
                 writeReadyTime = -1;
-                
-                preCount += 1;
             }
-            
-            readCount += 1;
             
             return clock + timing.read_to_data;
             
@@ -680,11 +663,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
                 preReadyTime   = -1;
                 readReadyTime  = -1;
                 writeReadyTime = -1;
-                
-                preCount += 1;
             }
-            
-            writeCount += 1;
             
             return clock + timing.write_to_data;
         
