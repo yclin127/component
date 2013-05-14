@@ -25,6 +25,8 @@ struct AddressMapping {
 };
 
 struct ChannelTiming {
+    uint32_t any_to_any;
+    uint32_t act_to_any;
     uint32_t read_to_read;
     uint32_t read_to_write;
     uint32_t write_to_read;

@@ -31,6 +31,8 @@ Config::Config(std::map<std::string, int> config)
     timing.transaction_delay = _(tTQ);
     timing.command_delay     = _(tCQ);
     
+    timing.channel.any_to_any     = _(tCMD);
+    timing.channel.act_to_any     = _(tRA);
     timing.channel.read_to_read   = _(tBL)+_(tRTRS);
     timing.channel.read_to_write  = _(tCL)+_(tBL)+_(tRTRS)-_(tCWL);
     timing.channel.write_to_read  = _(tCWL)+_(tBL)+_(tRTRS)-_(tCL);
@@ -44,9 +46,9 @@ Config::Config(std::map<std::string, int> config)
     timing.rank.write_to_write = std::max(_(tBL), _(tCCD));
     timing.rank.refresh_to_act = _(tRFC);
     
-    timing.bank.act_to_read   = _(tRCD)-_(tAL);
-    timing.bank.act_to_write  = _(tRCD)-_(tAL);
-    timing.bank.act_to_pre    = _(tRAS);
+    timing.bank.act_to_read   = _(tRCD)-_(tAL) + _(tRA)-_(tCMD);
+    timing.bank.act_to_write  = _(tRCD)-_(tAL) + _(tRA)-_(tCMD);
+    timing.bank.act_to_pre    = _(tRAS) + _(tRA)-_(tCMD);
     timing.bank.read_to_pre   = _(tAL)+_(tBL)+std::max(_(tRTP)-_(tCCD), 0);
     timing.bank.write_to_pre  = _(tAL)+_(tCWL)+_(tBL)+_(tWR);
     timing.bank.pre_to_act    = _(tRP);
@@ -120,7 +122,7 @@ bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &
     command.finishTime  = finishTime;
     command.transaction = &transaction;
     
-    //std::cerr << command << std::endl;
+    std::cerr << command << std::endl;
     
     return true;
 }
@@ -344,7 +346,10 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
         case COMMAND_act:
         case COMMAND_refresh:
         case COMMAND_pre:
-            anyReadyTime   = clock + 1;
+            anyReadyTime = clock + timing.any_to_any;
+            if (type == COMMAND_act) {
+                anyReadyTime = std::max(anyReadyTime, clock + timing.act_to_any);
+            }
             
             commandBusEnergy += energy.command_bus;
             if (type == COMMAND_act) {
@@ -355,7 +360,7 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
             
         case COMMAND_read:
         case COMMAND_read_pre:
-            anyReadyTime   = clock + 1;
+            anyReadyTime   = clock + timing.any_to_any;
             readReadyTime  = clock + timing.read_to_read;
             writeReadyTime = clock + timing.read_to_write;
             
@@ -369,7 +374,7 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
             
         case COMMAND_write:
         case COMMAND_write_pre:
-            anyReadyTime   = clock + 1;
+            anyReadyTime   = clock + timing.any_to_any;
             readReadyTime  = clock + timing.write_to_read;
             writeReadyTime = clock + timing.write_to_write;
             
