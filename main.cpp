@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
     getSettings(settings);
     
     Config *config = new Config(settings);    
-    MemoryController *mc = new MemoryController(config);
+    MemoryControllerHub *mch = new MemoryControllerHub(config);
     
     FILE* file = fopen(argv[1], "r");
     uint32_t max_clock = atoi(argv[2]);
@@ -30,18 +30,18 @@ int main(int argc, char *argv[])
             || strcmp(command, "P_MEM_WR") == 0
             || strcmp(command, "P_LOCK_WR") == 0;
         while (clock < time && clock < max_clock) {
-            mc->cycle(clock);
+            mch->cycle(clock);
             clock += 1;
         }
-        while (!mc->addTransaction(clock, address, is_write) && clock < max_clock) {
-            mc->cycle(clock);
+        while (!mch->addTransaction(clock, address, is_write) && clock < max_clock) {
+            mch->cycle(clock);
             clock += 1;
         }
     }
     
     fclose(file);
     
-    delete mc;
+    delete mch;
     delete config;
     
     return 0;
@@ -62,8 +62,8 @@ void getSettings(std::map<std::string, int> &settings)
     settings["max_row_idle"] = 0;
     settings["max_row_hits"] = 5;
     
-    settings["tTQ"]   = 0;
-    settings["tCQ"]   = 1;
+    settings["tTQ"]   = 1;
+    settings["tCQ"]   = 0;
     settings["tCMD"]  = 1;
     settings["tRCMD"] = 1;
     

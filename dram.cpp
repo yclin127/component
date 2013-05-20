@@ -128,7 +128,7 @@ void MemoryControllerHub::cycle(int64_t clock)
         Transaction &transaction = (*irq);
         
         if (transaction.is_pending) {
-            if (transaction.readyTime >= clock && 
+            if (clock >= transaction.readyTime && 
                 controllers[transaction.channel]->addTransaction(&transaction)) {
                 transaction.is_pending = false;
             }
