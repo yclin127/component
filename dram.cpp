@@ -51,19 +51,8 @@ Config::Config(std::map<std::string, int> config)
     timing.rank.refresh_latency  = _(tRFC);
     timing.rank.refresh_interval = _(tREFI);
     
-    timing.rank.powerdown_latency = new uint32_t[5];
-    timing.rank.powerdown_latency[0] = _(tCKE); // double check
-    timing.rank.powerdown_latency[1] = _(tCKE); // double check
-    timing.rank.powerdown_latency[2] = 0;
-    timing.rank.powerdown_latency[3] = _(tCKE); // double check
-    timing.rank.powerdown_latency[4] = _(tCKE); // double check
-    
-    timing.rank.powerup_latency = new uint32_t[5];
-    timing.rank.powerup_latency[0] = _(tXP); // double check
-    timing.rank.powerup_latency[1] = _(tXP); // double check
-    timing.rank.powerup_latency[2] = 0;
-    timing.rank.powerup_latency[3] = _(tXP); // double check
-    timing.rank.powerup_latency[4] = _(tXP); // double check
+    timing.rank.powerdown_latency = _(tCKE); // double check
+    timing.rank.powerup_latency   = _(tXP); // double check
     
     timing.bank.act_to_read   = _(tRCD)-_(tAL) + _(tRCMD)-_(tCMD);
     timing.bank.act_to_write  = _(tRCD)-_(tAL) + _(tRCMD)-_(tCMD);
@@ -79,61 +68,35 @@ Config::Config(std::map<std::string, int> config)
     energy.write   = (_(IDD4W)-_(IDD3N))*_(tBL)*nDevice;
     energy.refresh = (_(IDD5)-_(IDD3N))*_(tRFC)*nDevice;
     
-    energy.static_per_cycle = new uint32_t[6];
-    energy.static_per_cycle[0] = _(IDD3N);
-    energy.static_per_cycle[1] = _(IDD3Ps);
-    energy.static_per_cycle[2] = _(IDD3Pf);
-    energy.static_per_cycle[3] = _(IDD2N);
-    energy.static_per_cycle[4] = _(IDD2Q);
-    energy.static_per_cycle[5] = _(IDD2P);
+    energy.powerup_per_cycle   = _(IDD3N);
+    energy.powerdown_per_cycle = _(IDD2Q);
 
 #undef _
 }
 
-MemoryController::MemoryController(Config *_config) :
+
+
+MemoryControllerHub::MemoryControllerHub(Config *_config) :
     config(_config),
-    system(_config),
-    transactionQueue(config->nTransaction),
-    commandQueue(config->nCommand),
-    rankList((int)config->nChannel*config->nRank),
-    bankList((int)config->nChannel*config->nRank*config->nBank)
+    transactionQueue(config->nTransaction)
 {
-    Coordinates coordinates = {0};
-    uint32_t refresh_step = config->timing.rank.refresh_interval/config->nRank;
-    
-    for (coordinates.channel=0; coordinates.channel<config->nChannel; ++coordinates.channel) {
-        for (coordinates.rank=0; coordinates.rank<config->nRank; ++coordinates.rank) {                
-            for (coordinates.bank=0; coordinates.bank<config->nBank; ++coordinates.bank) {
-                
-                // initialize row buffer
-                RowBuffer &rowBuffer = system.getRowBuffer(coordinates);
-                
-                rowBuffer.tag = -1;
-                rowBuffer.hits = 0;
-                rowBuffer.is_busy = false;
-            }
-            
-            coordinates.bank = 0;
-            rankList.push() = coordinates;
-            
-            // initialize refresh counter
-            RefreshCounter &refreshCounter = system.getRefreshCounter(coordinates);
-            
-            refreshCounter.busyCounter = 0;
-            refreshCounter.expectedTime = refresh_step*(coordinates.rank+1);
-            refreshCounter.is_sleeping = false;
-        }
+    controllers = new MemoryController*[config->nChannel];
+    for (uint32_t i=0; i<config->nChannel; ++i) {
+        controllers[i] = new MemoryController(config);
     }
 }
 
-MemoryController::~MemoryController()
+MemoryControllerHub::~MemoryControllerHub()
 {
+    for (uint32_t i=0; i<config->nChannel; ++i) {
+        delete controllers[i];
+    }
+    delete [] controllers;
 }
 
-bool MemoryController::addTransaction(int64_t clock, uint64_t address, bool is_write)
+bool MemoryControllerHub::addTransaction(int64_t clock, uint64_t address, bool is_write)
 {
-    if (transactionQueue.is_full())
-        return false;
+    if (transactionQueue.is_full()) return false;
     
     Transaction &transaction = transactionQueue.push();
     
@@ -142,7 +105,6 @@ bool MemoryController::addTransaction(int64_t clock, uint64_t address, bool is_w
     transaction.is_pending  = true;
     transaction.is_finished = false;
     transaction.readyTime   = clock + config->timing.transaction_delay;
-    transaction.finishTime  = -1;
     
     /** Address mapping scheme goes here. */
     AddressMapping &mapping = config->mapping;
@@ -156,103 +118,138 @@ bool MemoryController::addTransaction(int64_t clock, uint64_t address, bool is_w
     return true;
 }
 
+void MemoryControllerHub::cycle(int64_t clock)
+{
+    LinkedList<Transaction>::Iterator irq;
+    
+    // transaction issuing & retirement
+    transactionQueue.reset(irq);
+    while (transactionQueue.next(irq)) {
+        Transaction &transaction = (*irq);
+        
+        if (transaction.is_pending) {
+            if (transaction.readyTime >= clock && 
+                controllers[transaction.channel]->addTransaction(&transaction)) {
+                transaction.is_pending = false;
+            }
+        }
+        else if (transaction.is_finished) {
+            transactionQueue.remove(irq);
+        }
+    }
+    
+    for (uint8_t channel=0; channel<config->nChannel; ++channel) {
+        controllers[channel]->cycle(clock);
+    }
+}
+
+
+
+MemoryController::MemoryController(Config *_config) :
+    config(_config),
+    channel(_config),
+    transactionQueue(config->nTransaction),
+    commandQueue(config->nCommand)
+{
+    Coordinates coordinates = {0};
+    uint32_t refresh_step = config->timing.rank.refresh_interval/config->nRank;
+    
+    for (coordinates.rank=0; coordinates.rank<config->nRank; ++coordinates.rank) {
+        // initialize rank
+        RankData &rank = channel.getRankData(coordinates);
+        rank.demandCount = 0;
+        rank.activeCount = 0;
+        rank.refreshTime = refresh_step*(coordinates.rank+1);
+        rank.is_sleeping = false;
+        rank.is_busy = false;
+        
+        for (coordinates.bank=0; coordinates.bank<config->nBank; ++coordinates.bank) {
+            // initialize bank
+            BankData &bank = channel.getBankData(coordinates);
+            bank.demandCount = 0;
+            bank.rowBuffer = -1;
+            bank.hitCount = 0;
+            bank.is_busy = false;
+        }
+    }
+}
+
+MemoryController::~MemoryController()
+{
+}
+
+bool MemoryController::addTransaction(Transaction *transaction)
+{
+    if (transactionQueue.is_full())
+        return false;
+    
+    transactionQueue.push() = transaction;
+    
+    RankData &rank = channel.getRankData(*transaction);
+    BankData &bank = channel.getBankData(*transaction);
+    rank.demandCount += 1;
+    bank.demandCount += 1;
+    
+    return true;
+}
+
 bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &transaction)
 {
     if (commandQueue.is_full())
         return false;
     
-    int64_t readyTime, finishTime;
+    int64_t readyTime, issueTime, finishTime;
     
-    switch (type) {
-        case COMMAND_act:
-        case COMMAND_read:
-        case COMMAND_write:
-            clock = clock + config->timing.command_delay;
-            break;
-        default:
-            break;
-    }
-    readyTime = std::max(clock, system.getReadyTime(type, transaction));
-    /** Uncomment this line to switch from FCFS to FR-FCFS */
-    if (readyTime != clock) return false;
-    finishTime = system.getFinishTime(readyTime, type, transaction);
+    readyTime = channel.getReadyTime(type, transaction);
+    issueTime = clock + config->timing.command_delay;
+    if (readyTime > issueTime) return false;
+    
+    finishTime = channel.getFinishTime(issueTime, type, transaction);
     
     Command &command = commandQueue.push();
     
     command.type        = type;
-    command.readyTime   = readyTime;
+    command.issueTime   = issueTime;
     command.finishTime  = finishTime;
     command.transaction = &transaction;
     
-    if (type < COMMAND_powerup) {
-        std::cout << clock << " " << (
-            command.type == COMMAND_act ? "act" :
-            command.type == COMMAND_pre ? "pre" :
-            command.type == COMMAND_read ? "read" :
-            command.type == COMMAND_write ? "write" :
-            command.type == COMMAND_refresh ? "refresh" :
-            command.type == COMMAND_powerup ? "powerup" :
-            "powerdown") 
-            << " " << (int)transaction.channel 
-            << " " << (int)transaction.rank 
-            << " " << (int)transaction.bank;
-        switch (type) {
-            case COMMAND_act:
-            case COMMAND_read:
-            case COMMAND_write:
-                std::cout << " //" 
-                    << " pre: " << system.getReadyTime(COMMAND_pre, transaction)
-                    << " read: " << system.getReadyTime(COMMAND_write, transaction)
-                    << " write: " << system.getReadyTime(COMMAND_read, transaction);
-                break;
-            case COMMAND_pre:
-            case COMMAND_refresh:
-                std::cout << " //" 
-                    << " act: " << system.getReadyTime(COMMAND_act, transaction);
-                break;
-            default:
-                break;
-        }
-        std::cout << std::endl;
-    }
+    static const char *mne[] = {
+        "act", "pre", "read", "write", "read_pre", "write_pre", 
+        "refresh", "powerup", "powerdown",
+    };
+    if (command.type < COMMAND_powerup)
+    std::cout << issueTime 
+        << " " << mne[command.type]
+        << " " << (int)transaction.channel 
+        << " " << (int)transaction.rank 
+        << " " << (command.type >= COMMAND_refresh ? 0 : (int)transaction.bank)
+        << std::endl;
     
     return true;
 }
 
 void MemoryController::cycle(int64_t clock)
 {
-    system.cycle(clock);
+    channel.cycle(clock);
     
     Policy &policy = config->policy;
     
-    LinkedList<Transaction>::Iterator itq;
+    Coordinates coordinates = {0};
     LinkedList<Command>::Iterator icq;
-    LinkedList<Coordinates>::Iterator ico;
+    LinkedList<Transaction *>::Iterator itq;
     
-    // transaction retirement
-    transactionQueue.reset(itq);
-    while (transactionQueue.next(itq)) {
-        Transaction &transaction = (*itq);
-        
-        if (transaction.is_finished) {
-            transactionQueue.remove(itq);
-        }
-    }
-    
-    // comand retirement
-    commandQueue.reset(icq);
-    while (commandQueue.next(icq)) {
-        Command &command = (*icq);
+    // Command retirement
+    for (commandQueue.reset(icq); commandQueue.next(icq); ) {
+        Command &command = *icq;
         
         if (command.finishTime > clock) continue;
         
         switch (command.type) {
             case COMMAND_read:
             case COMMAND_write:
-            case COMMAND_read_pre:
-            case COMMAND_write_pre:
+            case COMMAND_read_precharge:
+            case COMMAND_write_precharge:
                 command.transaction->is_finished = true;
-                command.transaction->finishTime  = clock;
                 break;
                 
             default:
@@ -262,176 +259,109 @@ void MemoryController::cycle(int64_t clock)
         commandQueue.remove(icq);
     }
     
-    /** Memory scheduler algorithm goes here. */
-    
-    // FCFS or FR-FCFS
-    transactionQueue.reset(itq);
-    while (transactionQueue.next(itq)) {
-        Transaction &transaction = (*itq);
-        
-        if (!transaction.is_pending || transaction.readyTime > clock) continue;
-        
-        RefreshCounter &refreshCounter = system.getRefreshCounter(transaction);
-        RowBuffer &rowBuffer = system.getRowBuffer(transaction);
-        
-        // make way for Refresh
-        if (clock >= refreshCounter.expectedTime) continue;
-        
-        // Power up
-        if (refreshCounter.is_sleeping) {
-            if (!addCommand(clock, COMMAND_powerup, transaction)) continue;
-            
-            refreshCounter.is_sleeping = false;
-        }
-        
-        // Precharge
-        if (rowBuffer.tag != -1 && (rowBuffer.tag != (int32_t)transaction.row || 
-            rowBuffer.hits >= policy.max_row_hits)) {
-            if (!addCommand(clock, COMMAND_pre, transaction)) continue;
-            
-            rowBuffer.tag = -1;
-        }
-        
-        // Activation
-        if (rowBuffer.tag == -1) {
-            if (!addCommand(clock, COMMAND_act, transaction)) continue;
-            
-            rowBuffer.tag = (int32_t)transaction.row;
-            rowBuffer.hits = 0;
-            if (!rowBuffer.is_busy) {
-                bankList.push() = (Coordinates)transaction;
-                refreshCounter.busyCounter += 1;
-                rowBuffer.is_busy = true;
-            }
-        }
-        
-        // Read / Write
-        if (rowBuffer.tag == (int32_t)transaction.row) {
-            CommandType type = transaction.is_write ? COMMAND_write : COMMAND_read;
-            if (!addCommand(clock, type, transaction)) continue;
-            
-            rowBuffer.hits += 1;
-            transaction.is_pending = false;
-        }
-    }
-    
-    // Precharge policy
-    bankList.reset(ico);
-    while (bankList.next(ico)) {
-        Coordinates &coordinates = (*ico);
-        
-        RefreshCounter &refreshCounter = system.getRefreshCounter(coordinates);
-        RowBuffer &rowBuffer = system.getRowBuffer(coordinates);
-        
-        assert(rowBuffer.is_busy);
-        // bank been Precharged for another row Activation.
-        if (rowBuffer.tag == -1) {
-            // make way for Refresh
-            if (clock >= refreshCounter.expectedTime) {
-                refreshCounter.busyCounter -= 1;
-                rowBuffer.is_busy = false;
-                
-                bankList.remove(ico);
-            }
-            continue;
-        }
-        
-        int64_t readyTime = system.getReadyTime(COMMAND_pre, coordinates);
-        int64_t idleTime = readyTime + policy.max_row_idle;
-        
-        // Precharge
-        if (clock >= refreshCounter.expectedTime || // Refresh
-            clock >= idleTime || rowBuffer.hits >= policy.max_row_hits // Policy
-        ) {
-            if (!addCommand(clock, COMMAND_pre, (Transaction &)coordinates)) continue;
-            
-            refreshCounter.busyCounter -= 1;
-            rowBuffer.is_busy = false;
-            rowBuffer.tag = -1;
-            
-            bankList.remove(ico);
-        }
-    }
-    
     // Refresh policy
-    rankList.reset(ico);
-    while (rankList.next(ico)) {
-        Coordinates &coordinates = (*ico);
+    for (coordinates.rank = 0; coordinates.rank < config->nRank; ++coordinates.rank) {
+        RankData &rank = channel.getRankData(coordinates);
         
-        RefreshCounter &refreshCounter = system.getRefreshCounter(coordinates);
+        if (clock < rank.refreshTime - config->timing.rank.powerup_latency) continue;
         
-        if (clock < refreshCounter.expectedTime || refreshCounter.busyCounter > 0) continue;
+        rank.is_busy = true;
         
         // Power up
-        if (refreshCounter.is_sleeping) {
-            if (!addCommand(clock-3, COMMAND_powerup, (Transaction &)coordinates)) continue;
-            
-            refreshCounter.is_sleeping = false;
+        if (rank.is_sleeping) {
+            if (!addCommand(clock, COMMAND_powerup, (Transaction &)coordinates)) continue;
+            rank.is_sleeping = false;
         }
+        
+        if (clock < rank.refreshTime) continue;
+        
+        // Precharge
+        for (coordinates.bank = 0; coordinates.bank < config->nBank; ++coordinates.bank) {
+            BankData &bank = channel.getBankData(coordinates);
+            
+            if (bank.rowBuffer != -1) {
+                if (!addCommand(clock, COMMAND_precharge, (Transaction &)coordinates)) continue;
+                rank.activeCount -= 1;
+                bank.rowBuffer = -1;
+            }
+        }
+        if (rank.activeCount > 0) continue;
         
         // Refresh
         if (!addCommand(clock, COMMAND_refresh, (Transaction &)coordinates)) continue;
+        rank.refreshTime += config->timing.rank.refresh_interval;
+        rank.is_busy = false;
+    }
+    
+    // Schedule policy
+    for (transactionQueue.reset(itq); transactionQueue.next(itq); ) {
+        Transaction &transaction = **itq;
+        RankData &rank = channel.getRankData(transaction);
+        BankData &bank = channel.getBankData(transaction);
         
-        refreshCounter.expectedTime += config->timing.rank.refresh_interval;
+        // make way for Refresh
+        if (clock >= rank.refreshTime) continue;
+        
+        rank.is_busy = true;
+        
+        // Power up
+        if (rank.is_sleeping) {
+            if (!addCommand(clock, COMMAND_powerup, transaction)) continue;
+            rank.is_sleeping = false;
+        }
+        
+        // Precharge
+        if (bank.rowBuffer != -1 && (bank.rowBuffer != (int)transaction.row || bank.hitCount >= policy.max_row_hits)) {
+            if (!addCommand(clock, COMMAND_precharge, transaction)) continue;
+            rank.activeCount -= 1;
+            bank.rowBuffer = -1;
+        }
+        
+        // Activate
+        if (bank.rowBuffer == -1) {
+            if (!addCommand(clock, COMMAND_activate, transaction)) continue;
+            rank.activeCount += 1;
+            bank.rowBuffer = transaction.row;
+            bank.hitCount = 0;
+        }
+        
+        // Read / Write
+        CommandType type = transaction.is_write ? COMMAND_write : COMMAND_read;
+        if (!addCommand(clock, type, transaction)) continue;
+        rank.demandCount -= 1;
+        bank.demandCount -= 1;
+        bank.hitCount += 1;
+        transactionQueue.remove(itq);
+    }
+
+    // Precharge policy
+    for (coordinates.rank = 0; coordinates.rank < config->nRank; ++coordinates.rank) {
+        RankData &rank = channel.getRankData(coordinates);
+        for (coordinates.bank = 0; coordinates.bank < config->nBank; ++coordinates.bank) {
+            BankData &bank = channel.getBankData(coordinates);
+            
+            if (bank.rowBuffer == -1 || bank.demandCount > 0) continue;
+            
+            int64_t idleTime = clock - policy.max_row_idle;
+            if (!addCommand(idleTime, COMMAND_precharge, (Transaction &)coordinates)) continue;
+            rank.activeCount -= 1;
+            bank.rowBuffer = -1;
+            
+            if (rank.demandCount == 0 && rank.activeCount == 0) {
+                rank.is_busy = false;
+            }
+        }
     }
     
     // Power down policy
-    rankList.reset(ico);
-    while (rankList.next(ico)) {
-        Coordinates &coordinates = (*ico);
+    for (coordinates.rank = 0; coordinates.rank < config->nRank; ++coordinates.rank) {
+        RankData &rank = channel.getRankData(coordinates);
         
-        RefreshCounter &refreshCounter = system.getRefreshCounter(coordinates);
-        
-        if (refreshCounter.is_sleeping || refreshCounter.busyCounter > 0) continue;
+        if (rank.is_sleeping || rank.is_busy) continue;
         
         // Power down
         if (!addCommand(clock, COMMAND_powerdown, (Transaction &)coordinates)) continue;
-        
-        refreshCounter.is_sleeping = true;
-    }
-}
-
-MemorySystem::MemorySystem(Config *_config) :
-    config(_config)
-{
-    channels = new Channel*[config->nChannel];
-    for (uint32_t i=0; i<config->nChannel; ++i) {
-        channels[i] = new Channel(config);
-    }
-}
-
-MemorySystem::~MemorySystem()
-{
-    for (uint32_t i=0; i<config->nChannel; ++i) {
-        delete channels[i];
-    }
-    delete [] channels;
-}
-
-RowBuffer &MemorySystem::getRowBuffer(Coordinates &coordinates)
-{
-    return channels[coordinates.channel]->getRowBuffer(coordinates);
-}
-
-RefreshCounter &MemorySystem::getRefreshCounter(Coordinates &coordinates)
-{
-    return channels[coordinates.channel]->getRefreshCounter(coordinates);
-}
-
-int64_t MemorySystem::getReadyTime(CommandType type, Coordinates &coordinates)
-{
-    return channels[coordinates.channel]->getReadyTime(type, coordinates);
-}
-
-int64_t MemorySystem::getFinishTime(int64_t clock, CommandType type, Coordinates &coordinates)
-{
-    return channels[coordinates.channel]->getFinishTime(clock, type, coordinates);
-}
-
-void MemorySystem::cycle(int64_t clock)
-{
-    for (uint8_t channel=0; channel<config->nChannel; ++channel) {
-        channels[channel]->cycle(clock);
+        rank.is_sleeping = true;
     }
 }
 
@@ -463,14 +393,14 @@ Channel::~Channel()
     delete [] ranks;
 }
 
-RowBuffer &Channel::getRowBuffer(Coordinates &coordinates)
+BankData &Channel::getBankData(Coordinates &coordinates)
 {
-    return ranks[coordinates.rank]->getRowBuffer(coordinates);
+    return ranks[coordinates.rank]->getBankData(coordinates);
 }
 
-RefreshCounter &Channel::getRefreshCounter(Coordinates &coordinates)
+RankData &Channel::getRankData(Coordinates &coordinates)
 {
-    return ranks[coordinates.rank]->getRefreshCounter(coordinates);
+    return ranks[coordinates.rank]->getRankData(coordinates);
 }
 
 int64_t Channel::getReadyTime(CommandType type, Coordinates &coordinates)
@@ -478,19 +408,16 @@ int64_t Channel::getReadyTime(CommandType type, Coordinates &coordinates)
     int64_t clock;
     
     switch (type) {
-        case COMMAND_act:
-        case COMMAND_pre:
+        case COMMAND_activate:
+        case COMMAND_precharge:
         case COMMAND_refresh:
-        case COMMAND_powerup:
-        // case COMMAND_powerdown + n: where n indicates the n-th power down mode (starting from 0)
-        case COMMAND_powerdown:
             clock = ranks[coordinates.rank]->getReadyTime(type, coordinates);
             clock = std::max(clock, anyReadyTime);
             
             return clock;
             
         case COMMAND_read:
-        case COMMAND_read_pre:
+        case COMMAND_read_precharge:
             clock = ranks[coordinates.rank]->getReadyTime(type, coordinates);
             clock = std::max(clock, anyReadyTime);
             if (rankSelect != coordinates.rank) {
@@ -500,12 +427,18 @@ int64_t Channel::getReadyTime(CommandType type, Coordinates &coordinates)
             return clock;
             
         case COMMAND_write:
-        case COMMAND_write_pre:
+        case COMMAND_write_precharge:
             clock = ranks[coordinates.rank]->getReadyTime(type, coordinates);
             clock = std::max(clock, anyReadyTime);
             if (rankSelect != coordinates.rank) {
                 clock = std::max(clock, writeReadyTime);
             }
+            
+            return clock;
+            
+        case COMMAND_powerup:
+        case COMMAND_powerdown:
+            clock = ranks[coordinates.rank]->getReadyTime(type, coordinates);
             
             return clock;
             
@@ -521,26 +454,22 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
     Energy &energy = config->energy;
     
     switch (type) {
-        case COMMAND_act:
-        case COMMAND_pre:
+        case COMMAND_activate:
+        case COMMAND_precharge:
         case COMMAND_refresh:
-        case COMMAND_powerup:
-        // case COMMAND_powerdown + n: where n indicates the n-th power down mode (starting from 0)
-        case COMMAND_powerdown:
             anyReadyTime = clock + timing.any_to_any;
-            if (type == COMMAND_act) {
+            if (type == COMMAND_activate) {
                 anyReadyTime = std::max(anyReadyTime, clock + timing.act_to_any);
             }
             
             commandBusEnergy += energy.command_bus;
-            if (type == COMMAND_act) {
+            if (type == COMMAND_activate) {
                 addressBusEnergy += energy.row_address_bus;
             }
-            
             return ranks[coordinates.rank]->getFinishTime(clock, type, coordinates);
             
         case COMMAND_read:
-        case COMMAND_read_pre:
+        case COMMAND_read_precharge:
             anyReadyTime   = clock + timing.any_to_any;
             readReadyTime  = clock + timing.read_to_read;
             writeReadyTime = clock + timing.read_to_write;
@@ -554,7 +483,7 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
             return ranks[coordinates.rank]->getFinishTime(clock, type, coordinates);
             
         case COMMAND_write:
-        case COMMAND_write_pre:
+        case COMMAND_write_precharge:
             anyReadyTime   = clock + timing.any_to_any;
             readReadyTime  = clock + timing.write_to_read;
             writeReadyTime = clock + timing.write_to_write;
@@ -565,6 +494,10 @@ int64_t Channel::getFinishTime(int64_t clock, CommandType type, Coordinates &coo
             
             rankSelect = coordinates.rank;
             
+            return ranks[coordinates.rank]->getFinishTime(clock, type, coordinates);
+            
+        case COMMAND_powerup:
+        case COMMAND_powerdown:
             return ranks[coordinates.rank]->getFinishTime(clock, type, coordinates);
             
         default:
@@ -592,8 +525,6 @@ Rank::Rank(Config *_config) :
         banks[i] = new Bank(config);
     }
     
-    powerMode = 0;
-    
     actReadyTime     = 0;
     fawReadyTime[0]  = 0;
     fawReadyTime[1]  = 0;
@@ -601,14 +532,14 @@ Rank::Rank(Config *_config) :
     fawReadyTime[3]  = 0;
     readReadyTime    = 0;
     writeReadyTime   = 0;
-    powerupReadyTime = 0;
+    powerupReadyTime = -1;
     
-    actEnergy     = 0;
-    preEnergy     = 0;
-    readEnergy    = 0;
-    writeEnergy   = 0;
-    refreshEnergy = 0;
-    staticEnergy  = 0;
+    actEnergy        = 0;
+    preEnergy        = 0;
+    readEnergy       = 0;
+    writeEnergy      = 0;
+    refreshEnergy    = 0;
+    backgroundEnergy = 0;
 }
 
 Rank::~Rank()
@@ -619,14 +550,14 @@ Rank::~Rank()
     delete [] banks;
 }
 
-RowBuffer &Rank::getRowBuffer(Coordinates &coordinates)
+BankData &Rank::getBankData(Coordinates &coordinates)
 {
-    return banks[coordinates.bank]->getRowBuffer(coordinates);
+    return banks[coordinates.bank]->getBankData(coordinates);
 }
 
-RefreshCounter &Rank::getRefreshCounter(Coordinates &coordinates)
+RankData &Rank::getRankData(Coordinates &coordinates)
 {
-    return refreshCounter;
+    return data;
 }
 
 int64_t Rank::getReadyTime(CommandType type, Coordinates &coordinates)
@@ -634,48 +565,45 @@ int64_t Rank::getReadyTime(CommandType type, Coordinates &coordinates)
     int64_t clock;
     
     switch (type) {
-        case COMMAND_act:
+        case COMMAND_activate:
             clock = banks[coordinates.bank]->getReadyTime(type, coordinates);
             clock = std::max(clock, actReadyTime);
             clock = std::max(clock, fawReadyTime[0]);
             
             return clock;
             
-        case COMMAND_pre:
+        case COMMAND_precharge:
             clock = banks[coordinates.bank]->getReadyTime(type, coordinates);
             
             return clock;
             
         case COMMAND_read:
-        case COMMAND_read_pre:
+        case COMMAND_read_precharge:
             clock = banks[coordinates.bank]->getReadyTime(type, coordinates);
             clock = std::max(clock, readReadyTime);
             
             return clock;
             
         case COMMAND_write:
-        case COMMAND_write_pre:
+        case COMMAND_write_precharge:
             clock = banks[coordinates.bank]->getReadyTime(type, coordinates);
             clock = std::max(clock, writeReadyTime);
             
             return clock;
             
-        case COMMAND_powerup:
-            assert(powerMode != 0);
-            
-            return powerupReadyTime;
-            
         case COMMAND_refresh:
-        // case COMMAND_powerdown + n: where n indicates the n-th power down mode (starting from 0)
-        case COMMAND_powerdown:
-            assert(powerMode == 0);
-            
             clock = actReadyTime;
             for (uint8_t i=0; i<config->nBank; ++i) {
-                clock = std::max(clock, banks[i]->getReadyTime(COMMAND_act, coordinates));
+                clock = std::max(clock, banks[i]->getReadyTime(COMMAND_activate, coordinates));
             }
             
             return clock;
+            
+        case COMMAND_powerup:
+            return powerupReadyTime;
+            
+        case COMMAND_powerdown:
+            return 0;
             
         default:
             assert(0);
@@ -689,7 +617,7 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
     Energy &energy = config->energy;
     
     switch (type) {
-        case COMMAND_act:
+        case COMMAND_activate:
             actReadyTime = clock + timing.act_to_act;
             
             fawReadyTime[0] = fawReadyTime[1];
@@ -701,11 +629,11 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
-        case COMMAND_pre:
+        case COMMAND_precharge:
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
         case COMMAND_read:
-        case COMMAND_read_pre:
+        case COMMAND_read_precharge:
             readReadyTime  = clock + timing.read_to_read;
             writeReadyTime = clock + timing.read_to_write;
             
@@ -714,7 +642,7 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             return banks[coordinates.bank]->getFinishTime(clock, type, coordinates);
             
         case COMMAND_write:
-        case COMMAND_write_pre:
+        case COMMAND_write_precharge:
             readReadyTime  = clock + timing.write_to_read;
             writeReadyTime = clock + timing.write_to_write;
             
@@ -735,7 +663,7 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             return clock;
             
         case COMMAND_powerup:
-            actReadyTime = clock + timing.powerup_latency[powerMode - 1];
+            actReadyTime = clock + timing.powerup_latency;
             
             fawReadyTime[0] = actReadyTime;
             fawReadyTime[1] = actReadyTime;
@@ -744,11 +672,8 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             
             powerupReadyTime = -1;
             
-            powerMode = 0;
-            
             return clock;
             
-        // case COMMAND_powerdown + n: where n indicates the n-th power down mode (starting from 0)
         case COMMAND_powerdown:
             actReadyTime = -1;
             
@@ -757,9 +682,7 @@ int64_t Rank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             fawReadyTime[2] = actReadyTime;
             fawReadyTime[3] = actReadyTime;
             
-            powerupReadyTime = clock + timing.powerdown_latency[type - COMMAND_powerdown];
-            
-            powerMode = type - COMMAND_powerup; // 0 is for power up mode
+            powerupReadyTime = clock + timing.powerdown_latency;
             
             return clock;
             
@@ -773,7 +696,10 @@ void Rank::cycle(int64_t clock)
 {
     Energy &energy = config->energy;
     
-    staticEnergy += energy.static_per_cycle[powerMode];
+    if (powerupReadyTime == -1)
+        backgroundEnergy += energy.powerup_per_cycle;
+    else
+        backgroundEnergy += energy.powerdown_per_cycle;
 }
 
 Bank::Bank(Config *_config) :
@@ -789,39 +715,39 @@ Bank::~Bank()
 {
 }
 
-RowBuffer &Bank::getRowBuffer(Coordinates &coordinates)
+BankData &Bank::getBankData(Coordinates &coordinates)
 {
-    return rowBuffer;
+    return data;
 }
 
 int64_t Bank::getReadyTime(CommandType type, Coordinates &coordinates)
 {
     switch (type) {
-        case COMMAND_act:
+        case COMMAND_activate:
             assert(actReadyTime != -1);
             
             return actReadyTime;
             
-        case COMMAND_pre:
+        case COMMAND_precharge:
             assert(preReadyTime != -1);
             
             return preReadyTime;
             
         case COMMAND_read:
-        case COMMAND_read_pre:
+        case COMMAND_read_precharge:
             assert(readReadyTime != -1);
             
             return readReadyTime;
             
         case COMMAND_write:
-        case COMMAND_write_pre:
+        case COMMAND_write_precharge:
             assert(writeReadyTime != -1);
             
             return writeReadyTime;
             
         //case COMMAND_refresh:
         //case COMMAND_powerup:
-        //case COMMAND_powerdonw+n:
+        //case COMMAND_powerdonw:
             
         default:
             assert(0);
@@ -834,7 +760,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
     BankTiming &timing = config->timing.bank;
     
     switch (type) {
-        case COMMAND_act:
+        case COMMAND_activate:
             assert(actReadyTime != -1);
             assert(clock >= actReadyTime);
             
@@ -845,7 +771,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             
             return clock;
             
-        case COMMAND_pre:
+        case COMMAND_precharge:
             assert(preReadyTime != -1);
             assert(clock >= preReadyTime);
             
@@ -857,7 +783,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             return clock;
             
         case COMMAND_read:
-        case COMMAND_read_pre:
+        case COMMAND_read_precharge:
             assert(readReadyTime != -1);
             assert(clock >= readReadyTime);
             
@@ -876,7 +802,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
             return clock + timing.read_to_data;
             
         case COMMAND_write:
-        case COMMAND_write_pre:
+        case COMMAND_write_precharge:
             assert(writeReadyTime != -1);
             assert(clock >= writeReadyTime);
             
@@ -896,7 +822,7 @@ int64_t Bank::getFinishTime(int64_t clock, CommandType type, Coordinates &coordi
         
         //case COMMAND_refresh:
         //case COMMAND_powerup:
-        //case COMMAND_powerdonw+n:
+        //case COMMAND_powerdonw:
             
         default:
             assert(0);
