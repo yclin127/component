@@ -104,7 +104,7 @@ MemoryControllerHub::~MemoryControllerHub()
     }*/
 }
 
-bool MemoryControllerHub::addTransaction(int64_t clock, uint64_t address, bool is_write)
+bool MemoryControllerHub::addRequest(int64_t clock, uint64_t address, bool is_write)
 {
     AddressMapping &mapping = config->mapping;
     

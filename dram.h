@@ -1,11 +1,11 @@
 #include "configure.h"
 #include "container.h"
-#include <stdint.h>
+#include "memory.h"
 #include <ostream>
 
-using namespace Configure;
-
 namespace DRAM {
+
+using namespace Memory;
 
 struct AddressMapping {
     BitField channel;
@@ -313,7 +313,7 @@ public:
     void cycle(int64_t clock);
 };
 
-class MemoryControllerHub
+class MemoryControllerHub : public Memory::Memory
 {
 protected:
     Config *config;
@@ -324,7 +324,7 @@ public:
     MemoryControllerHub(Config *_config);
     virtual ~MemoryControllerHub();
     
-    bool addTransaction(int64_t clock, uint64_t address, bool is_write);
+    bool addRequest(int64_t clock, uint64_t address, bool is_write);
     void cycle(int64_t clock);
 };
 

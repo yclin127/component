@@ -29,7 +29,7 @@ int main(int argc, char *argv[])
         is_write = strcmp(command, "WRITE") == 0 
             || strcmp(command, "P_MEM_WR") == 0 
             || strcmp(command, "BOFF") == 0;
-        while (clock < max_clock && (clock < time || !mch->addTransaction(clock, address, is_write))) {
+        while (clock < max_clock && (clock < time || !mch->addRequest(clock, address, is_write))) {
             mch->cycle(clock);
             clock += 1;
         }
