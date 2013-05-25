@@ -103,6 +103,7 @@ struct Config {
     uint32_t nRow;
     uint32_t nColumn;
     
+    uint32_t nRequest;
     uint32_t nTransaction;
     uint32_t nCommand;
     
@@ -130,23 +131,6 @@ struct Coordinates {
     }
 };
 
-struct Transaction : public Coordinates {
-    uint64_t address;
-    bool is_write;
-    bool is_pending;
-    bool is_finished;
-    int64_t readyTime; /**< The time when the transaction is ready for dispatching. */
-    
-    friend std::ostream &operator <<(std::ostream &os, Transaction &transaction) {
-        os << "{"
-           << "is_write: " << transaction.is_write 
-           << ", address: 0x" << std::hex << transaction.address  << std::dec
-           << ", coordinates: " << (Coordinates &)transaction 
-           << "}";
-        return os;
-    }
-};
-
 /** DRAM command types */
 enum CommandType {
     COMMAND_activate, /**< row activation */
@@ -160,19 +144,49 @@ enum CommandType {
     COMMAND_powerdown, /**< rank powerdown */
 };
 
-/** DRAM command */
-struct Command {
+struct Request {
+    uint64_t address;
+    bool is_write;
+    
+    int64_t allocateTime;
+    int64_t releaseTime;
+    
+    inline int latency() { return releaseTime - allocateTime; };
+    
+    friend std::ostream &operator <<(std::ostream &os, Request &request) {
+        os << "{"
+           << "is_write: " << request.is_write
+           << ", address: 0x" << std::hex << request.address  << std::dec
+           << "}";
+        return os;
+    }
+};
+
+struct Transaction : public Coordinates {
+    Request *request;
+    
+    friend std::ostream &operator <<(std::ostream &os, Transaction &transaction) {
+        os << "{"
+           << "request: " << *transaction.request
+           << ", coordinates: " << (Coordinates &)transaction 
+           << "}";
+        return os;
+    }
+};
+
+struct Command : public Coordinates {
+    Request *request;
     CommandType type; /**< DRAM command type */
+    
     int64_t issueTime; /**< The time when the command is sent through a channel. */
-    int64_t finishTime; /**< The time when the data is received from or send through a channel. */
-    Transaction *transaction; /**< The cooresponding transaction of the command. */
+    int64_t finishTime; /**< The time when the command is sent through a channel. */
     
     friend std::ostream &operator <<(std::ostream &os, Command &command) {
         os << "{"
            << "type: " << command.type 
            << ", issueTime: " << command.issueTime 
            << ", finishTime: " << command.finishTime 
-           << ", transaction: " << *(command.transaction)
+           << ", request: " << *command.request
            << "}";
         return os;
     }
@@ -182,9 +196,9 @@ struct Command {
 
 struct BankData {
     int32_t demandCount;
+    int32_t supplyCount;
     int32_t rowBuffer;
     uint8_t hitCount;
-    bool is_busy;
 };
 
 struct RankData {
@@ -192,7 +206,6 @@ struct RankData {
     int32_t activeCount;
     int32_t refreshTime;
     bool is_sleeping;
-    bool is_busy;
 };
 
 
@@ -289,16 +302,23 @@ protected:
     
     Channel channel;
     
-    LinkedList<Transaction*> transactionQueue;
-    LinkedList<Command>      commandQueue;
+    Queue<Request *>
+        requestQueue;
+    LinkedList<Request>
+        dataBuffer;
+    LinkedList<Transaction>
+        transactionQueue;
+    Queue<Command>
+        commandQueue;
     
-    bool addCommand(int64_t clock, CommandType type, Transaction &transaction);
+    bool addCommand(int64_t clock, CommandType type, Coordinates &coordinates, Request *request);
+    bool addTransaction(int64_t clock, Request &request);
 
 public:
     MemoryController(Config *_config);
     virtual ~MemoryController();
     
-    bool addTransaction(Transaction *transaction);
+    bool addRequest(int64_t clock, uint64_t address, bool is_write);
     void cycle(int64_t clock);
 };
 
@@ -308,8 +328,6 @@ protected:
     Config *config;
     
     MemoryController** controllers;
-    
-    LinkedList<Transaction> transactionQueue;
 
 public:
     MemoryControllerHub(Config *_config);

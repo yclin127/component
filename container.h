@@ -65,7 +65,7 @@ public:
     }
     
     DataType &operator [](int index) {
-        assert(index >=0 && index < this->length);
+        assert(index >= 0 && index < (int)this->m_length);
         
         return this->m_data[(this->m_cursor+index)%this->m_size];
     }
@@ -101,7 +101,7 @@ public:
     }
     
     DataType &shift() {
-        DataType &data = this->m_data[0];
+        DataType &data = (*this)[0];
         this->m_cursor = (this->m_cursor+1)%this->m_size;
         this->m_length -= 1;
         

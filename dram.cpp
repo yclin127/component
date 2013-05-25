@@ -6,10 +6,12 @@ Config::Config(std::map<std::string, int> config)
 {
 #define _(key) config[#key]
 
+    nRequest     = _(request);
     nTransaction = _(transaction);
     nCommand     = _(command);
     
-    nDevice  = _(devices);
+    nDevice  = _(device);
+    
     nChannel = 1 << _(channel);
     nRank    = 1 << _(rank);
     nBank    = 1 << _(bank);
@@ -21,10 +23,10 @@ Config::Config(std::map<std::string, int> config)
     mapping.channel.width  = _(channel);
     mapping.column.offset  = offset; offset +=
     mapping.column.width   = _(column);
-    mapping.bank.offset    = offset; offset +=
-    mapping.bank.width     = _(bank);
     mapping.rank.offset    = offset; offset +=
     mapping.rank.width     = _(rank);   
+    mapping.bank.offset    = offset; offset +=
+    mapping.bank.width     = _(bank);
     mapping.row.offset     = offset; offset +=
     mapping.row.width      = _(row);
     
@@ -60,8 +62,8 @@ Config::Config(std::map<std::string, int> config)
     timing.bank.read_to_pre   = _(tAL)+_(tBL)+std::max(_(tRTP), _(tCCD))-_(tCCD); // double check
     timing.bank.write_to_pre  = _(tAL)+_(tCWL)+_(tBL)+_(tWR); // double check
     timing.bank.pre_to_act    = _(tRP);
-    timing.bank.read_to_data  = _(tAL)+_(tCL);
-    timing.bank.write_to_data = _(tAL)+_(tCWL);
+    timing.bank.read_to_data  = _(tAL)+_(tCL) + 5;
+    timing.bank.write_to_data = _(tAL)+_(tCWL) + 5;
     
     energy.act     = (((_(IDD0)-_(IDD3N))*_(tRAS))+((_(IDD0)-_(IDD2N))*_(tRP)))*nDevice;
     energy.read    = (_(IDD4R)-_(IDD3N))*_(tBL)*nDevice;
@@ -76,9 +78,12 @@ Config::Config(std::map<std::string, int> config)
 
 
 
+/*static const int bins = 128;
+static int hist[bins];
+static int read_count, write_count;
+*/
 MemoryControllerHub::MemoryControllerHub(Config *_config) :
-    config(_config),
-    transactionQueue(config->nTransaction)
+    config(_config)
 {
     controllers = new MemoryController*[config->nChannel];
     for (uint32_t i=0; i<config->nChannel; ++i) {
@@ -92,55 +97,32 @@ MemoryControllerHub::~MemoryControllerHub()
         delete controllers[i];
     }
     delete [] controllers;
+
+    /*std::cerr << "---\n";
+    for(int i=0; i<bins; ++i) {
+        std::cerr << hist[i] << "\n";
+    }*/
 }
 
 bool MemoryControllerHub::addTransaction(int64_t clock, uint64_t address, bool is_write)
 {
-    if (transactionQueue.is_full()) return false;
-    
-    Transaction &transaction = transactionQueue.push();
-    
-    transaction.address     = address;
-    transaction.is_write    = is_write;
-    transaction.is_pending  = true;
-    transaction.is_finished = false;
-    transaction.readyTime   = clock + config->timing.transaction_delay;
-    
-    /** Address mapping scheme goes here. */
     AddressMapping &mapping = config->mapping;
     
-    transaction.channel = mapping.channel.value(address);
-    transaction.rank    = mapping.rank.value(address);
-    transaction.bank    = mapping.bank.value(address);
-    transaction.row     = mapping.row.value(address);
-    transaction.column  = mapping.column.value(address);
+    int channel = mapping.channel.value(address);
     
-    return true;
+    return controllers[channel]->addRequest(clock, address, is_write);
 }
 
 void MemoryControllerHub::cycle(int64_t clock)
 {
-    LinkedList<Transaction>::Iterator irq;
-    
-    // transaction issuing & retirement
-    transactionQueue.reset(irq);
-    while (transactionQueue.next(irq)) {
-        Transaction &transaction = (*irq);
-        
-        if (transaction.is_pending) {
-            if (clock >= transaction.readyTime && 
-                controllers[transaction.channel]->addTransaction(&transaction)) {
-                transaction.is_pending = false;
-            }
-        }
-        else if (transaction.is_finished) {
-            transactionQueue.remove(irq);
-        }
-    }
-    
     for (uint8_t channel=0; channel<config->nChannel; ++channel) {
         controllers[channel]->cycle(clock);
     }
+    
+    /*if ((clock+1) % 4000 == 0) {
+        std::cerr << read_count << "\t" << write_count << "\n";
+        read_count = write_count = 0;
+    }*/
 }
 
 
@@ -148,6 +130,8 @@ void MemoryControllerHub::cycle(int64_t clock)
 MemoryController::MemoryController(Config *_config) :
     config(_config),
     channel(_config),
+    requestQueue(config->nRequest),
+    dataBuffer(config->nRequest),
     transactionQueue(config->nTransaction),
     commandQueue(config->nCommand)
 {
@@ -161,15 +145,12 @@ MemoryController::MemoryController(Config *_config) :
         rank.activeCount = 0;
         rank.refreshTime = refresh_step*(coordinates.rank+1);
         rank.is_sleeping = false;
-        rank.is_busy = false;
         
         for (coordinates.bank=0; coordinates.bank<config->nBank; ++coordinates.bank) {
             // initialize bank
             BankData &bank = channel.getBankData(coordinates);
             bank.demandCount = 0;
             bank.rowBuffer = -1;
-            bank.hitCount = 0;
-            bank.is_busy = false;
         }
     }
 }
@@ -178,52 +159,86 @@ MemoryController::~MemoryController()
 {
 }
 
-bool MemoryController::addTransaction(Transaction *transaction)
+bool MemoryController::addRequest(int64_t clock, uint64_t address, bool is_write)
 {
-    if (transactionQueue.is_full())
-        return false;
+    if (dataBuffer.is_full()) return false;
     
-    transactionQueue.push() = transaction;
+    Request &request = dataBuffer.push();
     
-    RankData &rank = channel.getRankData(*transaction);
-    BankData &bank = channel.getBankData(*transaction);
-    rank.demandCount += 1;
-    bank.demandCount += 1;
+    request.address = address;
+    request.is_write = is_write;
+    
+    request.allocateTime = clock;
+    request.releaseTime  = -1;
+    
+    requestQueue.push() = &request;
     
     return true;
 }
 
-bool MemoryController::addCommand(int64_t clock, CommandType type, Transaction &transaction)
+bool MemoryController::addTransaction(int64_t clock, Request &request)
+{
+    if (transactionQueue.is_full()) return false;
+    
+    Transaction &transaction = transactionQueue.push();
+    
+    transaction.request = &request;
+    
+    /** Address mapping scheme goes here. */
+    AddressMapping &mapping = config->mapping;
+    
+    transaction.channel = mapping.channel.value(request.address);
+    transaction.rank    = mapping.rank.value(request.address);
+    transaction.bank    = mapping.bank.value(request.address);
+    transaction.row     = mapping.row.value(request.address);
+    transaction.column  = mapping.column.value(request.address);
+    
+    RankData &rank = channel.getRankData(transaction);
+    BankData &bank = channel.getBankData(transaction);
+    rank.demandCount += 1;
+    bank.demandCount += 1;
+    
+    if ((int)transaction.row == bank.rowBuffer) {
+        bank.supplyCount += 1;
+    }
+    
+    return true;
+}
+
+bool MemoryController::addCommand(int64_t clock, CommandType type, Coordinates &coordinates, Request *request)
 {
     if (commandQueue.is_full())
         return false;
     
     int64_t readyTime, issueTime, finishTime;
     
-    readyTime = channel.getReadyTime(type, transaction);
+    readyTime = channel.getReadyTime(type, coordinates);
     issueTime = clock + config->timing.command_delay;
     if (readyTime > issueTime) return false;
     
-    finishTime = channel.getFinishTime(issueTime, type, transaction);
+    finishTime = channel.getFinishTime(issueTime, type, coordinates);
     
     Command &command = commandQueue.push();
     
+    (Coordinates &)command = coordinates;
+    
+    command.request     = request;
     command.type        = type;
     command.issueTime   = issueTime;
     command.finishTime  = finishTime;
-    command.transaction = &transaction;
     
-    static const char *mne[] = {
+    /*static const char *mne[] = {
         "act", "pre", "read", "write", "read_pre", "write_pre", 
         "refresh", "powerup", "powerdown",
     };
     if (command.type < COMMAND_powerup)
-    std::cout << issueTime 
+    std::cout << issueTime
         << " " << mne[command.type]
-        << " " << (int)transaction.channel 
-        << " " << (int)transaction.rank 
-        << " " << (command.type >= COMMAND_refresh ? 0 : (int)transaction.bank)
-        << std::endl;
+        << " " << (int)coordinates.channel 
+        << " " << (int)coordinates.rank
+        << " " << (command.type >= COMMAND_refresh ? 0 : (int)coordinates.bank)
+        << " " << (command.type >= COMMAND_refresh || command.type == COMMAND_precharge ? 0 : (int)coordinates.row)
+        << std::endl;*/
     
     return true;
 }
@@ -235,52 +250,41 @@ void MemoryController::cycle(int64_t clock)
     Policy &policy = config->policy;
     
     Coordinates coordinates = {0};
-    LinkedList<Command>::Iterator icq;
-    LinkedList<Transaction *>::Iterator itq;
+    LinkedList<Request>::Iterator irq;
+    LinkedList<Transaction>::Iterator itq, itqs;
     
-    // Command retirement
-    for (commandQueue.reset(icq); commandQueue.next(icq); ) {
-        Command &command = *icq;
+    /** Request to Transaction */
+    
+    while (!requestQueue.is_empty()) {
+        Request &request = *requestQueue.first();
         
-        if (command.finishTime > clock) continue;
+        int readyTime = request.allocateTime + config->timing.transaction_delay;
+        if (clock < readyTime) continue;
         
-        switch (command.type) {
-            case COMMAND_read:
-            case COMMAND_write:
-            case COMMAND_read_precharge:
-            case COMMAND_write_precharge:
-                command.transaction->is_finished = true;
-                break;
-                
-            default:
-                break;
-        }
-        
-        commandQueue.remove(icq);
+        if (!addTransaction(clock, request)) break; // in-order
+        requestQueue.shift();
     }
+    
+    /** Transaction to Command */
     
     // Refresh policy
     for (coordinates.rank = 0; coordinates.rank < config->nRank; ++coordinates.rank) {
         RankData &rank = channel.getRankData(coordinates);
         
-        if (clock < rank.refreshTime - config->timing.rank.powerup_latency) continue;
-        
-        rank.is_busy = true;
+        if (clock < rank.refreshTime) continue;
         
         // Power up
         if (rank.is_sleeping) {
-            if (!addCommand(clock, COMMAND_powerup, (Transaction &)coordinates)) continue;
+            if (!addCommand(clock, COMMAND_powerup, coordinates, NULL)) continue;
             rank.is_sleeping = false;
         }
-        
-        if (clock < rank.refreshTime) continue;
         
         // Precharge
         for (coordinates.bank = 0; coordinates.bank < config->nBank; ++coordinates.bank) {
             BankData &bank = channel.getBankData(coordinates);
             
             if (bank.rowBuffer != -1) {
-                if (!addCommand(clock, COMMAND_precharge, (Transaction &)coordinates)) continue;
+                if (!addCommand(clock, COMMAND_precharge, coordinates, NULL)) continue;
                 rank.activeCount -= 1;
                 bank.rowBuffer = -1;
             }
@@ -288,49 +292,60 @@ void MemoryController::cycle(int64_t clock)
         if (rank.activeCount > 0) continue;
         
         // Refresh
-        if (!addCommand(clock, COMMAND_refresh, (Transaction &)coordinates)) continue;
+        if (!addCommand(clock, COMMAND_refresh, coordinates, NULL)) continue;
         rank.refreshTime += config->timing.rank.refresh_interval;
-        rank.is_busy = false;
     }
     
     // Schedule policy
     for (transactionQueue.reset(itq); transactionQueue.next(itq); ) {
-        Transaction &transaction = **itq;
+        Transaction &transaction = *itq;
         RankData &rank = channel.getRankData(transaction);
         BankData &bank = channel.getBankData(transaction);
         
         // make way for Refresh
         if (clock >= rank.refreshTime) continue;
         
-        rank.is_busy = true;
-        
         // Power up
         if (rank.is_sleeping) {
-            if (!addCommand(clock, COMMAND_powerup, transaction)) continue;
+            if (!addCommand(clock, COMMAND_powerup, transaction, NULL)) continue;
             rank.is_sleeping = false;
         }
         
         // Precharge
-        if (bank.rowBuffer != -1 && (bank.rowBuffer != (int)transaction.row || bank.hitCount >= policy.max_row_hits)) {
-            if (!addCommand(clock, COMMAND_precharge, transaction)) continue;
+        if (bank.rowBuffer != -1 && (bank.rowBuffer != (int)transaction.row || 
+            bank.hitCount >= policy.max_row_hits)) {
+            if (bank.rowBuffer != (int)transaction.row && bank.supplyCount > 0) continue;
+            if (!addCommand(clock, COMMAND_precharge, transaction, NULL)) continue;
             rank.activeCount -= 1;
             bank.rowBuffer = -1;
         }
         
         // Activate
         if (bank.rowBuffer == -1) {
-            if (!addCommand(clock, COMMAND_activate, transaction)) continue;
+            if (!addCommand(clock, COMMAND_activate, transaction, NULL)) continue;
             rank.activeCount += 1;
             bank.rowBuffer = transaction.row;
             bank.hitCount = 0;
+            bank.supplyCount = 0;
+            for (transactionQueue.reset(itqs); transactionQueue.next(itqs);) {
+                if ((*itqs).rank == transaction.rank && 
+                    (*itqs).bank == transaction.bank && 
+                    (*itqs).row == transaction.row) {
+                    bank.supplyCount += 1;
+                }
+            }
         }
         
         // Read / Write
-        CommandType type = transaction.is_write ? COMMAND_write : COMMAND_read;
-        if (!addCommand(clock, type, transaction)) continue;
+        assert(bank.rowBuffer == (int)transaction.row);
+        assert(bank.supplyCount > 0);
+        CommandType type = transaction.request->is_write ? COMMAND_write : COMMAND_read;
+        if (!addCommand(clock, type, transaction, transaction.request)) continue;
         rank.demandCount -= 1;
         bank.demandCount -= 1;
+        bank.supplyCount -= 1;
         bank.hitCount += 1;
+        
         transactionQueue.remove(itq);
     }
 
@@ -343,13 +358,9 @@ void MemoryController::cycle(int64_t clock)
             if (bank.rowBuffer == -1 || bank.demandCount > 0) continue;
             
             int64_t idleTime = clock - policy.max_row_idle;
-            if (!addCommand(idleTime, COMMAND_precharge, (Transaction &)coordinates)) continue;
+            if (!addCommand(idleTime, COMMAND_precharge, coordinates, NULL)) continue;
             rank.activeCount -= 1;
             bank.rowBuffer = -1;
-            
-            if (rank.demandCount == 0 && rank.activeCount == 0) {
-                rank.is_busy = false;
-            }
         }
     }
     
@@ -357,11 +368,53 @@ void MemoryController::cycle(int64_t clock)
     for (coordinates.rank = 0; coordinates.rank < config->nRank; ++coordinates.rank) {
         RankData &rank = channel.getRankData(coordinates);
         
-        if (rank.is_sleeping || rank.is_busy) continue;
+        if (rank.is_sleeping || 
+            rank.demandCount > 0 || rank.activeCount > 0 || // rank is serving requests
+            clock >= rank.refreshTime // rank is under refreshing
+        ) continue;
         
         // Power down
-        if (!addCommand(clock, COMMAND_powerdown, (Transaction &)coordinates)) continue;
+        if (!addCommand(clock, COMMAND_powerdown, coordinates, NULL)) continue;
         rank.is_sleeping = true;
+    }
+    
+    /** Command retirement */
+    
+    while (!commandQueue.is_empty()) {
+        Command &command = commandQueue.first();
+        
+        if (clock < command.issueTime) break; // in-order
+        
+        switch (command.type) {
+            case COMMAND_read:
+            case COMMAND_read_precharge:
+            case COMMAND_write:
+            case COMMAND_write_precharge:
+                command.request->releaseTime = command.finishTime;
+                break;
+                
+            default:
+                break;
+        }
+        
+        commandQueue.shift();
+    }
+    
+    /** Request retirement */
+    
+    for (dataBuffer.reset(irq); dataBuffer.next(irq); ) {
+        Request &request = *irq;
+        
+        if (request.releaseTime == -1 || clock < request.releaseTime) continue;
+        
+        /*if (request.is_write) {
+            write_count += 1;
+        } else {
+            read_count += 1;
+            hist[std::min(request.latency()/10, bins)] += 1;
+        }*/
+        
+        dataBuffer.remove(irq);
     }
 }
 
